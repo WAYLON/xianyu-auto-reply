@@ -436,7 +436,7 @@ class PackageReplyService:
                 "周一", "周二", "周三", "周四", "周五", "周六", "周日",
                 "夜", "夜间", "过夜", "过夜费", "午夜", "服务费", "早餐", "自助",
                 "8h", "8小时", "16h", "16小时", "18h", "18小时",
-                "海鲜", "榴莲", "搓澡", "护理", "施丹兰",
+                "海鲜", "榴莲", "搓澡", "护理", "施丹兰", "消费券", "免门票",
             ]:
                 if contains_match_token(message, token) and contains_match_token(offer.package_name, token):
                     score += 0.16
@@ -472,6 +472,9 @@ class PackageReplyService:
             for optional_addon in ["榴莲", "海鲜", "自助", "娱乐"]:
                 if not contains_match_token(message, optional_addon) and contains_match_token(offer.package_name, optional_addon):
                     score -= 0.12
+            for numeric_marker in re.findall(r"\d{2,4}", normalize_text(message)):
+                if numeric_marker in package_text:
+                    score += 0.24
             number_match = re.search(r"(?:套餐|咨询)?\s*([1-9])", normalized)
             if number_match and (f"{number_match.group(1)}" in package_text or f"{number_match.group(1)}️⃣" in offer.package_name):
                 score += 0.35
