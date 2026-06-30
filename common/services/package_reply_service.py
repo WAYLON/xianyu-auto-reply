@@ -469,6 +469,9 @@ class PackageReplyService:
             for required_token in ["学生", "双人", "单人", "成人", "儿童"]:
                 if contains_match_token(message, required_token) and not contains_match_token(offer.package_name, required_token):
                     score -= 0.45
+            for optional_addon in ["榴莲", "海鲜", "自助", "娱乐"]:
+                if not contains_match_token(message, optional_addon) and contains_match_token(offer.package_name, optional_addon):
+                    score -= 0.12
             number_match = re.search(r"(?:套餐|咨询)?\s*([1-9])", normalized)
             if number_match and (f"{number_match.group(1)}" in package_text or f"{number_match.group(1)}️⃣" in offer.package_name):
                 score += 0.35
