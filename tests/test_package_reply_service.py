@@ -46,6 +46,21 @@ class PackageReplyServiceTests(unittest.TestCase):
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0]["command_value"], "434389")
 
+    def test_parse_nested_package_title_keeps_full_title(self):
+        raw = """
+🎁【水裹·汤泉【躺平计划】工作日单人门票(16H)】
+🎉门市价299元 现价仅需298元
+【下单链接】http://dpurl.cn/chzMsnVz
+【团口令】1来美团，吃得更好，生活更好❤️复制整条信息，打开👉美团👈 http:/💰s0OTJmNzAwNzg💰
+
+1来美团，吃得更好，生活更好❤️复制整条信息，打开👉美团👈 http:/💰orphan💰
+"""
+        parsed = parse_package_material(raw)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["package_name"], "水裹·汤泉【躺平计划】工作日单人门票(16H)")
+        self.assertEqual(parsed[0]["command_type"], "group_text")
+        self.assertIn("s0OTJmNzAwNzg", parsed[0]["command_value"])
+        self.assertNotIn("orphan", parsed[0]["command_value"])
 
     def test_reply_template_contains_required_guidance_without_price_or_link(self):
         venue = SimpleNamespace(city="北京", venue_name="九号温泉生活馆")

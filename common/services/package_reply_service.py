@@ -24,8 +24,8 @@ from common.services.ai_provider_service import build_openai_url
 
 
 NUMERIC_COMMAND_CONTEXT = re.compile(r"(美团搜索|搜索口令|数字口令|团口令|口令)\D{0,12}(\d{6})")
-FULL_COMMAND_CONTEXT = re.compile(r"【团口令】\s*(.+?)(?=\n\s*🎁|$)", re.S)
-TITLE_PATTERN = re.compile(r"(?:🎁)?【([^】]{4,180})】")
+FULL_COMMAND_CONTEXT = re.compile(r"【团口令】\s*(.+?)(?=\n\s*\n|\n\s*🎁|$)", re.S)
+TITLE_LINE_PATTERN = re.compile(r"^\s*(?:🎁)?【(.{4,220})】\s*$")
 PRICE_OR_LINK_LINE = re.compile(r"(门市价|现价|下单链接|http://|https://|dpurl\.cn)", re.I)
 MATERIAL_FIELD_TITLES = {"下单链接", "团口令", "搜索口令", "美团搜索", "数字口令"}
 
@@ -93,11 +93,17 @@ def parse_package_material(raw_text: str) -> list[dict[str, Any]]:
     if not text_value:
         return []
 
-    titles = [
-        (m.start(), m.end(), m.group(1).strip())
-        for m in TITLE_PATTERN.finditer(text_value)
-        if m.group(1).strip() not in MATERIAL_FIELD_TITLES
-    ]
+    titles: list[tuple[int, int, str]] = []
+    offset = 0
+    for line in text_value.splitlines(keepends=True):
+        stripped = line.strip()
+        match = TITLE_LINE_PATTERN.match(stripped)
+        if match:
+            title = match.group(1).strip()
+            if title not in MATERIAL_FIELD_TITLES:
+                title_start = offset + line.find(stripped)
+                titles.append((title_start, title_start + len(stripped), title))
+        offset += len(line)
     if not titles:
         return []
 
@@ -411,7 +417,13 @@ class PackageReplyService:
                 if key and key in normalized:
                     score += min(0.28, 0.08 + len(key) * 0.018)
             package_text = normalize_text(offer.package_name)
-            for token in ["单人", "双人", "儿童", "学生", "工作日", "节假日", "周末", "夜", "过夜", "午夜", "18h", "18小时", "自助", "海鲜", "榴莲"]:
+            for token in [
+                "单人", "双人", "儿童", "学生", "工作日", "节假日", "周末",
+                "周一", "周二", "周三", "周四", "周五", "周六", "周日",
+                "夜", "夜间", "过夜", "午夜", "早餐", "自助",
+                "8h", "8小时", "16h", "16小时", "18h", "18小时",
+                "海鲜", "榴莲",
+            ]:
                 if token.lower() in normalized and normalize_text(token) in package_text:
                     score += 0.16
             number_match = re.search(r"(?:套餐|咨询)?\s*([1-9])", normalized)
