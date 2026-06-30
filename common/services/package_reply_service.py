@@ -432,17 +432,16 @@ class PackageReplyService:
                     score += min(0.28, 0.08 + len(key) * 0.018)
             package_text = normalize_text(offer.package_name)
             for token in [
-                "单人", "双人", "成人", "儿童", "学生", "工作日", "节假日", "周末",
+                "单人", "双人", "亲子", "1大1小", "成人", "儿童", "学生", "工作日", "节假日", "周末",
                 "周一", "周二", "周三", "周四", "周五", "周六", "周日",
-                "夜", "夜间", "过夜", "过夜费", "午夜", "服务费", "早餐", "自助",
+                "全天", "夜", "夜票", "夜间", "过夜", "过夜费", "午夜", "服务费", "早餐", "自助",
                 "8h", "8小时", "16h", "16小时", "18h", "18小时",
-                "海鲜", "榴莲", "搓澡", "护理", "施丹兰", "消费券", "免门票",
+                "海鲜", "榴莲", "榴莲自由", "躺平计划", "早餐畅享",
+                "搓澡", "护理", "施丹兰", "消费券", "免门票",
             ]:
                 if contains_match_token(message, token) and contains_match_token(offer.package_name, token):
                     score += 0.16
                     matched_strong_tokens += 1
-            if matched_strong_tokens >= 3:
-                score = max(score, 0.76)
             conflict_pairs = [
                 ("工作日", "节假日"),
                 ("8h", "18h"),
@@ -453,6 +452,7 @@ class PackageReplyService:
                 ("周五", "周四"),
                 ("周六", "周四"),
             ]
+            conflict_count = 0
             for wanted, conflicting in conflict_pairs:
                 if (
                     contains_match_token(message, wanted)
@@ -460,18 +460,25 @@ class PackageReplyService:
                     and contains_match_token(offer.package_name, conflicting)
                 ):
                     score -= 0.32
+                    conflict_count += 1
                 if (
                     contains_match_token(message, conflicting)
                     and not contains_match_token(offer.package_name, conflicting)
                     and contains_match_token(offer.package_name, wanted)
                 ):
                     score -= 0.32
-            for required_token in ["学生", "双人", "单人", "成人", "儿童"]:
+                    conflict_count += 1
+            for required_token in ["学生", "双人", "亲子", "1大1小", "单人", "成人", "儿童"]:
                 if contains_match_token(message, required_token) and not contains_match_token(offer.package_name, required_token):
                     score -= 0.45
+                    conflict_count += 1
             for optional_addon in ["榴莲", "海鲜", "自助", "娱乐"]:
                 if not contains_match_token(message, optional_addon) and contains_match_token(offer.package_name, optional_addon):
                     score -= 0.12
+            if conflict_count == 0 and matched_strong_tokens >= 3 and score >= 0.5:
+                score = max(score, 0.76)
+            elif conflict_count == 0 and matched_strong_tokens >= 2 and score >= 0.3:
+                score = max(score, 0.73)
             for numeric_marker in re.findall(r"\d{2,4}", normalize_text(message)):
                 if numeric_marker in package_text:
                     score += 0.24
