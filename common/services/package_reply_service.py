@@ -432,11 +432,11 @@ class PackageReplyService:
                     score += min(0.28, 0.08 + len(key) * 0.018)
             package_text = normalize_text(offer.package_name)
             for token in [
-                "单人", "双人", "儿童", "学生", "工作日", "节假日", "周末",
+                "单人", "双人", "成人", "儿童", "学生", "工作日", "节假日", "周末",
                 "周一", "周二", "周三", "周四", "周五", "周六", "周日",
-                "夜", "夜间", "过夜", "午夜", "早餐", "自助",
+                "夜", "夜间", "过夜", "过夜费", "午夜", "早餐", "自助",
                 "8h", "8小时", "16h", "16小时", "18h", "18小时",
-                "海鲜", "榴莲",
+                "海鲜", "榴莲", "搓澡", "护理", "施丹兰",
             ]:
                 if contains_match_token(message, token) and contains_match_token(offer.package_name, token):
                     score += 0.16
@@ -466,7 +466,7 @@ class PackageReplyService:
                     and contains_match_token(offer.package_name, wanted)
                 ):
                     score -= 0.32
-            for required_token in ["学生", "双人", "单人", "儿童"]:
+            for required_token in ["学生", "双人", "单人", "成人", "儿童"]:
                 if contains_match_token(message, required_token) and not contains_match_token(offer.package_name, required_token):
                     score -= 0.45
             number_match = re.search(r"(?:套餐|咨询)?\s*([1-9])", normalized)
