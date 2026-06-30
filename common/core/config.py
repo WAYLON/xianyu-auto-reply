@@ -98,6 +98,11 @@ class BaseConfig(BaseSettings):
     # Docker / 无头 Linux 环境必须保持关闭（无桌面无法驱动物理鼠标），故默认 False。
     captcha_real_mouse_enabled: bool = Field(default=False, alias="CAPTCHA_REAL_MOUSE")
 
+    # 套餐团口令 AI 匹配配置。API Key 必须通过环境变量注入，避免写入代码或日志。
+    package_reply_ai_base_url: str = Field(default="https://api.siliconflow.com/v1", alias="PACKAGE_REPLY_AI_BASE_URL")
+    package_reply_ai_model: str = Field(default="zai-org/GLM-5.2", alias="PACKAGE_REPLY_AI_MODEL")
+    package_reply_ai_api_key: str = Field(default="", alias="PACKAGE_REPLY_AI_API_KEY", repr=False)
+
     @property
     def database_url(self) -> str:
         """同步数据库连接URL"""

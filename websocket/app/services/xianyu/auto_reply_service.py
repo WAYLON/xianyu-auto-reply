@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import traceback
@@ -32,6 +33,11 @@ from common.models.xy_order import XYOrder
 from common.db.session import async_session_maker
 from common.db.redis_client import distributed_lock
 from common.utils.default_reply_api import call_reply_api
+from common.services.package_reply_service import (
+    PackageReplyService,
+    build_package_clarification_text,
+    build_package_reply_text,
+)
 
 from app.services.xianyu.resource_manager import pause_manager
 from app.services.xianyu.auto_reply_log_service import AutoReplyLogService
@@ -225,6 +231,24 @@ class AutoReplyService:
         else:
             result["content"] = content
         return result
+
+    def _is_auto_reply_echo(self, parsed_message: Dict[str, Any]) -> bool:
+        """识别系统自动回复回流的自发消息，避免误暂停会话。"""
+        try:
+            raw_message = parsed_message.get("raw_message")
+            if not isinstance(raw_message, dict):
+                return False
+            message_meta = raw_message.get("1", {}).get("10", {})
+            if not isinstance(message_meta, dict):
+                return False
+            ext_json_raw = message_meta.get("extJson")
+            if not isinstance(ext_json_raw, str) or not ext_json_raw:
+                return False
+            ext_json = json.loads(ext_json_raw)
+            return isinstance(ext_json, dict) and str(ext_json.get("quickReply")) == "1"
+        except Exception as exc:
+            logger.debug(f"【{self.cookie_id}】识别自动回复回流消息失败: {exc}")
+            return False
     
     def _is_send_results_success(self, send_results: List[Dict[str, Any]]) -> bool:
         """判断发送结果是否全部成功"""
@@ -580,6 +604,11 @@ class AutoReplyService:
             myid = getattr(self.xianyu_instance, 'myid', self.cookie_id)
             self._merge_log_context(log_payload, myid=myid)
             if send_user_id == myid:
+                if self._is_auto_reply_echo(parsed_message):
+                    logger.info(f"【{self.cookie_id}】检测到自动回复回流消息，跳过暂停: chat_id={chat_id}")
+                    log_payload["process_status"] = "skipped"
+                    log_payload["decision_reason"] = "self_auto_reply_echo"
+                    return
                 # 手动发出消息，暂停该会话的自动回复
                 log_payload["process_status"] = "skipped"
                 log_payload["decision_reason"] = "self_message"
@@ -1093,6 +1122,10 @@ class AutoReplyService:
                             reply_trace["decision_reason"] = "empty_reply"
                         return None
                     return keyword_reply
+
+                package_reply = await self.get_package_reply(session, send_message, item_id)
+                if package_reply:
+                    return package_reply
                 
                 ai_reply = await self.get_ai_reply(
                     session, send_user_name, send_user_id, send_message, item_id, chat_id
@@ -1124,6 +1157,75 @@ class AutoReplyService:
                 reply_trace["error_message"] = str(e)
             return None
     
+    async def get_package_reply(
+        self,
+        session: AsyncSession,
+        send_message: str,
+        item_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """基于商品绑定和套餐库匹配团口令回复。"""
+        reply_trace = self._reply_trace_var.get()
+        try:
+            service = PackageReplyService(session)
+            match = await service.match_for_message(self.cookie_id, item_id, send_message)
+            if not match.offer or not match.venue or match.need_clarification:
+                if match.venue and match.need_clarification:
+                    clarification_reply = build_package_clarification_text(match.venue)
+                    if reply_trace is not None:
+                        reply_trace["reply_strategy"] = "package_ai"
+                        reply_trace["reply_mode"] = "text"
+                        reply_trace["matched_rule_type"] = "package_clarification"
+                        reply_trace["reply_text"] = clarification_reply
+                        reply_trace["reply_segments"] = self._build_text_reply_segments(clarification_reply)
+                        reply_trace.setdefault("context_snapshot", {})["package_reply"] = {
+                            "matched": False,
+                            "confidence": match.confidence,
+                            "reason": match.reason,
+                            "venue_id": match.venue.id,
+                            "need_clarification": True,
+                        }
+                    logger.info(
+                        f"【{self.cookie_id}】套餐门店已匹配但套餐不明确，发送追问 item_id={item_id} "
+                        f"venue={match.venue.venue_name} confidence={match.confidence:.2f}"
+                    )
+                    return clarification_reply
+                if reply_trace is not None:
+                    reply_trace.setdefault("context_snapshot", {})["package_reply"] = {
+                        "matched": False,
+                        "confidence": match.confidence,
+                        "reason": match.reason,
+                        "venue_id": match.venue.id if match.venue else None,
+                        "need_clarification": match.need_clarification,
+                    }
+                return None
+
+            text_reply = build_package_reply_text(match.offer, match.venue)
+            if reply_trace is not None:
+                reply_trace["reply_strategy"] = "package_ai"
+                reply_trace["reply_mode"] = "text"
+                reply_trace["matched_keyword"] = match.offer.command_value[:120]
+                reply_trace["matched_rule_type"] = "package_offer"
+                reply_trace["reply_text"] = text_reply
+                reply_trace["reply_segments"] = self._build_text_reply_segments(text_reply)
+                reply_trace.setdefault("context_snapshot", {})["package_reply"] = {
+                    "matched": True,
+                    "confidence": match.confidence,
+                    "reason": match.reason,
+                    "venue_id": match.venue.id,
+                    "offer_id": match.offer.id,
+                    "package_name": match.offer.package_name,
+                }
+            logger.info(
+                f"【{self.cookie_id}】套餐回复匹配成功 item_id={item_id} "
+                f"venue={match.venue.venue_name} offer={match.offer.package_name} confidence={match.confidence:.2f}"
+            )
+            return text_reply
+        except Exception as exc:
+            logger.warning(f"【{self.cookie_id}】套餐回复匹配失败，继续后续策略: {exc}")
+            if reply_trace is not None:
+                reply_trace.setdefault("context_snapshot", {})["package_reply_error"] = str(exc)
+            return None
+
     async def get_keyword_reply(
         self,
         session: AsyncSession,

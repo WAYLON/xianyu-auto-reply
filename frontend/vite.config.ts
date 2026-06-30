@@ -3,6 +3,8 @@ import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
+const apiTarget = process.env.VITE_API_TARGET || 'http://localhost:8089'
+
 /**
  * 拦截非法 URI 编码的请求插件
  * 背景：当浏览器或外部探测请求发来包含非法百分号编码（如单独的 % 或不合法的 %xx）的 URL 时，
@@ -51,13 +53,13 @@ export default defineConfig({
     proxy: {
       // 所有 API 请求统一代理到后端（含WebSocket升级）
       '/api': {
-        target: 'http://localhost:8089',
+        target: apiTarget,
         changeOrigin: true,
         ws: true,
       },
       // 静态文件代理到后端（包含上传的图片）
       '/static': {
-        target: 'http://localhost:8089',
+        target: apiTarget,
         changeOrigin: true,
       },
     },

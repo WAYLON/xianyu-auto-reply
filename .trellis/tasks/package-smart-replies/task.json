@@ -1,0 +1,8 @@
+{
+  "id": "package-smart-replies",
+  "title": "套餐团口令智能回复",
+  "status": "done",
+  "owner": "waylon",
+  "created_at": "2026-06-30",
+  "areas": ["schema", "backend", "frontend", "websocket", "tests"]
+}

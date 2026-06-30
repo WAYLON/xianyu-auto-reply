@@ -27,6 +27,7 @@ const Accounts = React.lazy(() => import('@/pages/accounts/Accounts').then(m => 
 const Items = React.lazy(() => import('@/pages/items/Items').then(m => ({ default: m.Items })))
 const Orders = React.lazy(() => import('@/pages/orders/Orders').then(m => ({ default: m.Orders })))
 const Keywords = React.lazy(() => import('@/pages/keywords/Keywords').then(m => ({ default: m.Keywords })))
+const PackageReplies = React.lazy(() => import('@/pages/packageReplies/PackageReplies').then(m => ({ default: m.PackageReplies })))
 const About = React.lazy(() => import('@/pages/about/About').then(m => ({ default: m.About })))
 const Disclaimer = React.lazy(() => import('@/pages/disclaimer/Disclaimer').then(m => ({ default: m.Disclaimer })))
 const NotificationChannels = React.lazy(() => import('@/pages/notifications/NotificationChannels').then(m => ({ default: m.NotificationChannels })))
@@ -338,6 +339,7 @@ function App() {
             <Route path="items" element={<Items />} />
             <Route path="orders" element={<Orders />} />
             <Route path="keywords" element={<Keywords />} />
+            <Route path="package-replies" element={<PackageReplies />} />
             <Route path="message-logs" element={<AutoReplyLogs />} />
             <Route path="account-login-logs" element={<Navigate to="/admin/account-login-logs" replace />} />
             <Route path="risk-logs" element={<RiskLogs />} />

@@ -25,6 +25,7 @@ from common.models.xy_account import XYAccount
 from common.models.xy_catalog_item import XYCatalogItem
 from common.models.default_reply import DefaultReply
 from common.models.card import Card
+from common.models.package_reply import XYItemPackageBinding
 
 
 class ItemService:
@@ -74,6 +75,21 @@ class ItemService:
         )
         existing_rows = (await self.session.execute(stmt)).scalars().all()
         return {row.item_id: row for row in existing_rows}
+
+    async def get_package_protected_item_ids(self, account_id: str, item_ids: list[str]) -> set[str]:
+        """返回已绑定套餐且受保护的商品 ID，用于避免批量配置覆盖口令商品。"""
+        normalized_item_ids = [str(item_id).strip() for item_id in item_ids if str(item_id).strip()]
+        if not account_id or not normalized_item_ids:
+            return set()
+
+        stmt = select(XYItemPackageBinding.item_id).where(
+            XYItemPackageBinding.account_id == account_id,
+            XYItemPackageBinding.item_id.in_(normalized_item_ids),
+            XYItemPackageBinding.protected.is_(True),
+            XYItemPackageBinding.enabled.is_(True),
+        )
+        rows = (await self.session.execute(stmt)).scalars().all()
+        return {str(item_id) for item_id in rows}
 
     async def list_items(self, owner_id: int | None, account_id: str | None = None) -> list[dict]:
         """获取商品列表
@@ -590,6 +606,11 @@ class ItemService:
         existing_item = (await self.session.execute(stmt)).scalars().first()
 
         if existing_item:
+            if await self._is_package_protected_item(account.account_id, item_id):
+                logger.info(
+                    f"账号[{account.account_id}]商品 {item_id} 已绑定受保护套餐，跳过同步标题/价格覆盖"
+                )
+                return False
             new_title = item.get("title", "")
             new_price = item.get("price_text", "")
             changed = False
@@ -623,6 +644,10 @@ class ItemService:
         )
         self.session.add(new_item)
         return True
+
+    async def _is_package_protected_item(self, account_id: str, item_id: str) -> bool:
+        protected_ids = await self.get_package_protected_item_ids(account_id, [item_id])
+        return item_id in protected_ids
     
     async def _get_default_reply_status_batch(self, items_data: list) -> Dict[tuple, dict]:
         """批量获取商品默认回复状态

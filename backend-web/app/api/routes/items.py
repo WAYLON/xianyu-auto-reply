@@ -85,6 +85,24 @@ async def _execute_batch_item_operation(
         return ApiResponse(success=False, message=f"{action_verb}失败: {exc}")
 
 
+async def _filter_package_protected_items(
+    item_service: ItemService,
+    account_id: str,
+    item_ids: List[str],
+) -> tuple[List[str], int]:
+    protected_ids = await item_service.get_package_protected_item_ids(account_id, item_ids)
+    if not protected_ids:
+        return item_ids, 0
+    return [item_id for item_id in item_ids if item_id not in protected_ids], len(protected_ids)
+
+
+def _append_protected_skip_message(response: ApiResponse, skipped_count: int) -> ApiResponse:
+    if skipped_count <= 0:
+        return response
+    suffix = f"；已跳过 {skipped_count} 个受保护套餐口令商品"
+    return ApiResponse(success=response.success, message=f"{response.message or ''}{suffix}", data=response.data)
+
+
 @items_router.get("")
 async def list_items(
     current_user: User = Depends(deps.get_current_active_user),
@@ -397,6 +415,7 @@ async def batch_save_item_default_reply(
     payload: BatchItemDefaultReplyRequest,
     current_user: User = Depends(deps.get_current_active_user),
     account_service: AccountService = Depends(deps.get_account_service),
+    item_service: ItemService = Depends(deps.get_item_service),
     default_reply_service: DefaultReplyService = Depends(deps.get_default_reply_service),
 ) -> ApiResponse:
     """批量保存商品默认回复配置"""
@@ -417,8 +436,12 @@ async def batch_save_item_default_reply(
         if not valid:
             return ApiResponse(success=False, message=err)
 
-    return await _execute_batch_item_operation(
-        item_ids=payload.item_ids,
+    item_ids, skipped_count = await _filter_package_protected_items(item_service, cookie_id, payload.item_ids)
+    if not item_ids:
+        return ApiResponse(success=True, message=f"已跳过 {skipped_count} 个受保护套餐口令商品，未覆盖默认回复")
+
+    result = await _execute_batch_item_operation(
+        item_ids=item_ids,
         operation=lambda item_id: default_reply_service.save_item_default_reply(
             account_id=cookie_id,
             item_id=item_id,
@@ -433,6 +456,7 @@ async def batch_save_item_default_reply(
         action_verb="保存",
         subject="默认回复",
     )
+    return _append_protected_skip_message(result, skipped_count)
 
 
 class BatchDeleteDefaultReplyRequest(PydanticBaseModel):
@@ -446,6 +470,7 @@ async def batch_delete_item_default_reply(
     payload: BatchDeleteDefaultReplyRequest,
     current_user: User = Depends(deps.get_current_active_user),
     account_service: AccountService = Depends(deps.get_account_service),
+    item_service: ItemService = Depends(deps.get_item_service),
     default_reply_service: DefaultReplyService = Depends(deps.get_default_reply_service),
 ) -> ApiResponse:
     """批量删除商品默认回复配置"""
@@ -459,12 +484,17 @@ async def batch_delete_item_default_reply(
     if not payload.item_ids:
         return ApiResponse(success=False, message="请选择至少一个商品")
 
-    return await _execute_batch_item_operation(
-        item_ids=payload.item_ids,
+    item_ids, skipped_count = await _filter_package_protected_items(item_service, cookie_id, payload.item_ids)
+    if not item_ids:
+        return ApiResponse(success=True, message=f"已跳过 {skipped_count} 个受保护套餐口令商品，未删除默认回复")
+
+    result = await _execute_batch_item_operation(
+        item_ids=item_ids,
         operation=lambda item_id: default_reply_service.delete_item_default_reply(cookie_id, item_id),
         action_verb="删除",
         subject="默认回复",
     )
+    return _append_protected_skip_message(result, skipped_count)
 
 
 # ==================== 商品AI提示词 ====================
@@ -560,13 +590,18 @@ async def batch_delete_item_ai_prompt(
     
     if not payload.item_ids:
         return ApiResponse(success=False, message="请选择至少一个商品")
-    
-    return await _execute_batch_item_operation(
-        item_ids=payload.item_ids,
+
+    item_ids, skipped_count = await _filter_package_protected_items(item_service, cookie_id, payload.item_ids)
+    if not item_ids:
+        return ApiResponse(success=True, message=f"已跳过 {skipped_count} 个受保护套餐口令商品，未删除AI提示词")
+
+    result = await _execute_batch_item_operation(
+        item_ids=item_ids,
         operation=lambda item_id: item_service.update_item(account, item_id, {"ai_prompt": ""}),
         action_verb="删除",
         subject="AI提示词",
     )
+    return _append_protected_skip_message(result, skipped_count)
 
 
 class BatchSaveAiPromptRequest(PydanticBaseModel):
@@ -593,13 +628,18 @@ async def batch_save_item_ai_prompt(
     
     if not payload.item_ids:
         return ApiResponse(success=False, message="请选择至少一个商品")
-    
-    return await _execute_batch_item_operation(
-        item_ids=payload.item_ids,
+
+    item_ids, skipped_count = await _filter_package_protected_items(item_service, cookie_id, payload.item_ids)
+    if not item_ids:
+        return ApiResponse(success=True, message=f"已跳过 {skipped_count} 个受保护套餐口令商品，未覆盖AI提示词")
+
+    result = await _execute_batch_item_operation(
+        item_ids=item_ids,
         operation=lambda item_id: item_service.update_item(account, item_id, {"ai_prompt": payload.ai_prompt}),
         action_verb="保存",
         subject="AI提示词",
     )
+    return _append_protected_skip_message(result, skipped_count)
 
 
 # ==================== 商品详情（通用路由放在具体路由之后）====================

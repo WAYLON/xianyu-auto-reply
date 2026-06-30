@@ -1622,6 +1622,76 @@ class DatabaseInitializer:
                 INDEX idx_chat_quick_phrase_owner_sort (owner_id, sort_order)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='在线聊天快捷短语';
         """,
+
+        "xy_package_venues": """
+            CREATE TABLE IF NOT EXISTS xy_package_venues (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '套餐门店ID',
+                owner_id BIGINT NULL COMMENT '所属用户ID，空表示系统预置',
+                category VARCHAR(40) NOT NULL DEFAULT '洗浴' COMMENT '业务类目',
+                city VARCHAR(80) NOT NULL COMMENT '城市',
+                area VARCHAR(120) NULL COMMENT '商圈/区域',
+                brand VARCHAR(120) NOT NULL COMMENT '品牌',
+                venue_name VARCHAR(160) NOT NULL COMMENT '门店名称',
+                address_note VARCHAR(255) NULL COMMENT '地址备注',
+                aliases JSON NULL COMMENT '别名列表',
+                enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                INDEX idx_pkg_venue_owner_city (owner_id, city, enabled),
+                INDEX idx_pkg_venue_brand (brand, venue_name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='套餐回复门店';
+        """,
+
+        "xy_package_offers": """
+            CREATE TABLE IF NOT EXISTS xy_package_offers (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '套餐ID',
+                venue_id BIGINT NOT NULL COMMENT '门店ID',
+                package_name VARCHAR(255) NOT NULL COMMENT '套餐名称',
+                keywords JSON NULL COMMENT '匹配关键词',
+                command_type VARCHAR(20) NOT NULL DEFAULT 'numeric' COMMENT '口令类型 numeric/group_text',
+                command_value TEXT NOT NULL COMMENT '数字口令或完整团口令',
+                source_text TEXT NULL COMMENT '原始素材片段',
+                applicability_note VARCHAR(255) NULL COMMENT '适用说明',
+                protected TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否保护，防止同步覆盖',
+                enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用',
+                sort_order INT NOT NULL DEFAULT 100 COMMENT '排序',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                INDEX idx_pkg_offer_venue_enabled (venue_id, enabled, sort_order),
+                INDEX idx_pkg_offer_command (command_type, command_value(64))
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='套餐回复口令';
+        """,
+
+        "xy_item_package_bindings": """
+            CREATE TABLE IF NOT EXISTS xy_item_package_bindings (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '绑定ID',
+                owner_id BIGINT NULL COMMENT '所属用户ID',
+                account_id VARCHAR(80) NOT NULL COMMENT '闲鱼账号ID',
+                item_id VARCHAR(64) NOT NULL COMMENT '商品ID',
+                venue_id BIGINT NOT NULL COMMENT '门店ID',
+                protected TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否保护，防止同步覆盖',
+                enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用',
+                notes VARCHAR(255) NULL COMMENT '备注',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                UNIQUE KEY idx_pkg_bind_account_item (account_id, item_id),
+                INDEX idx_pkg_bind_venue (venue_id, enabled)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='商品套餐回复绑定';
+        """,
+
+        "xy_package_import_candidates": """
+            CREATE TABLE IF NOT EXISTS xy_package_import_candidates (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '导入候选ID',
+                owner_id BIGINT NULL COMMENT '所属用户ID',
+                raw_text TEXT NOT NULL COMMENT '原始粘贴素材',
+                parsed JSON NULL COMMENT '解析结果',
+                status VARCHAR(20) NOT NULL DEFAULT 'pending' COMMENT '状态 pending/resolved/ignored',
+                reason VARCHAR(255) NULL COMMENT '待确认原因',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                INDEX idx_pkg_candidate_owner_status (owner_id, status, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='套餐素材导入候选';
+        """,
     }
     
     # 字段迁移定义：表名 -> [(字段名, 字段定义, 在哪个字段后面)]

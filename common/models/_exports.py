@@ -62,6 +62,12 @@ from common.models.xy_delivery_block_rule import XYDeliveryBlockRule
 from common.models.xy_personal_blacklist import XYPersonalBlacklist
 from common.models.xy_platform_blacklist import XYPlatformBlacklist
 from common.models.chat_quick_phrase import ChatQuickPhrase
+from common.models.package_reply import (
+    XYItemPackageBinding,
+    XYPackageImportCandidate,
+    XYPackageOffer,
+    XYPackageVenue,
+)
 
 __all__ = [
     "User",
@@ -129,4 +135,8 @@ __all__ = [
     "XYPersonalBlacklist",
     "XYPlatformBlacklist",
     "ChatQuickPhrase",
+    "XYPackageVenue",
+    "XYPackageOffer",
+    "XYItemPackageBinding",
+    "XYPackageImportCandidate",
 ]

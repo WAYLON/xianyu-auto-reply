@@ -49,6 +49,7 @@ from . import (
     message_filters,
     notifications,
     orders,
+    package_replies,
     password_login,
     product_publish,
     publish_addresses,
@@ -120,6 +121,7 @@ api_router.include_router(ai.test_router, tags=["AI回复测试"])  # ai.py已�
 # 消息和回复
 api_router.include_router(message.router, prefix="/messages", tags=["消息管理"])
 api_router.include_router(default_replies.router, prefix="/default-replies", tags=["默认回复"])
+api_router.include_router(package_replies.router, tags=["套餐回复"])
 api_router.include_router(confirm_receipt_messages.router, prefix="/confirm-receipt-messages", tags=["确认收货消息"])
 api_router.include_router(message_filters.router, prefix="/message-filters", tags=["消息过滤器"])
 
