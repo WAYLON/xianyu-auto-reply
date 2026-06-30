@@ -81,6 +81,8 @@ def normalize_text(value: Any) -> str:
 def contains_match_token(text_value: str, token: str) -> bool:
     normalized = normalize_text(text_value)
     token_value = normalize_text(token)
+    if token_value in {"6h", "6小时"}:
+        return bool(re.search(r"(?<!\d)6(?:h|小时)", normalized))
     if token_value in {"8h", "8小时"}:
         return bool(re.search(r"(?<!\d)8(?:h|小时)", normalized))
     if token_value in {"16h", "16小时"}:
@@ -434,9 +436,9 @@ class PackageReplyService:
             for token in [
                 "单人", "双人", "亲子", "1大1小", "成人", "儿童", "学生", "工作日", "节假日", "周末",
                 "周一", "周二", "周三", "周四", "周五", "周六", "周日",
-                "全天", "夜", "夜票", "夜间", "过夜", "过夜费", "午夜", "服务费", "早餐", "自助",
-                "8h", "8小时", "16h", "16小时", "18h", "18小时",
-                "海鲜", "榴莲", "榴莲自由", "躺平计划", "早餐畅享",
+                "全天", "门票", "浴资", "夜", "夜票", "夜间", "过夜", "过夜费", "午夜", "服务费", "早餐", "自助",
+                "6h", "6小时", "8h", "8小时", "16h", "16小时", "18h", "18小时",
+                "海鲜", "榴莲", "榴莲自由", "躺平计划", "早餐畅享", "龙之梦", "浑南",
                 "搓澡", "护理", "施丹兰", "消费券", "免门票",
             ]:
                 if contains_match_token(message, token) and contains_match_token(offer.package_name, token):
@@ -472,13 +474,13 @@ class PackageReplyService:
                 if contains_match_token(message, required_token) and not contains_match_token(offer.package_name, required_token):
                     score -= 0.45
                     conflict_count += 1
-            for optional_addon in ["榴莲", "海鲜", "自助", "娱乐"]:
-                if not contains_match_token(message, optional_addon) and contains_match_token(offer.package_name, optional_addon):
-                    score -= 0.12
             if conflict_count == 0 and matched_strong_tokens >= 3 and score >= 0.5:
                 score = max(score, 0.76)
             elif conflict_count == 0 and matched_strong_tokens >= 2 and score >= 0.3:
                 score = max(score, 0.73)
+            for optional_addon in ["榴莲", "海鲜", "自助", "娱乐"]:
+                if not contains_match_token(message, optional_addon) and contains_match_token(offer.package_name, optional_addon):
+                    score -= 0.12
             for numeric_marker in re.findall(r"\d{2,4}", normalize_text(message)):
                 if numeric_marker in package_text:
                     score += 0.24
