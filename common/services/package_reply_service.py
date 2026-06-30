@@ -89,7 +89,7 @@ def extract_keywords(package_name: str) -> list[str]:
 
 def parse_package_material(raw_text: str) -> list[dict[str, Any]]:
     """从粘贴素材里解析套餐名和口令，忽略价格与下单链接。"""
-    text_value = str(raw_text or "").strip()
+    text_value = re.sub(r"\s*(🎁【)", r"\n\1", str(raw_text or "")).strip()
     if not text_value:
         return []
 
@@ -411,6 +411,7 @@ class PackageReplyService:
         best_score = 0.0
         for offer in offers:
             score = 0.0
+            matched_strong_tokens = 0
             keywords = list(offer.keywords_json or []) + extract_keywords(offer.package_name)
             for keyword in keywords:
                 key = normalize_text(keyword)
@@ -426,6 +427,9 @@ class PackageReplyService:
             ]:
                 if token.lower() in normalized and normalize_text(token) in package_text:
                     score += 0.16
+                    matched_strong_tokens += 1
+            if matched_strong_tokens >= 3:
+                score = max(score, 0.76)
             number_match = re.search(r"(?:套餐|咨询)?\s*([1-9])", normalized)
             if number_match and (f"{number_match.group(1)}" in package_text or f"{number_match.group(1)}️⃣" in offer.package_name):
                 score += 0.35

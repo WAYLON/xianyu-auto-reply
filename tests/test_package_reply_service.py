@@ -62,6 +62,24 @@ class PackageReplyServiceTests(unittest.TestCase):
         self.assertIn("s0OTJmNzAwNzg", parsed[0]["command_value"])
         self.assertNotIn("orphan", parsed[0]["command_value"])
 
+    def test_parse_inline_adjacent_titles(self):
+        raw = """
+🎁【水裹+早餐畅享（周五至周六）夜间门票+过夜费+自助早餐】
+🎉门市价637元 现价仅需399元
+【下单链接】http://dpurl.cn/TAJig4Nz
+【团口令】1来美团，吃得更好，生活更好❤️复制整条信息，打开👉美团👈 http:/💰qsMzg2N2Y3YWI💰 🎁【水裹+【躺平计划】工作日单人8小时浴资票】
+🎉门市价379元 现价仅需378元
+【下单链接】http://dpurl.cn/otNhm9Qz
+【团口令】1来美团，吃得更好，生活更好❤️复制整条信息，打开👉美团👈 http:/💰r0ZTEwYTA0ZjA💰
+"""
+        parsed = parse_package_material(raw)
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0]["package_name"], "水裹+早餐畅享（周五至周六）夜间门票+过夜费+自助早餐")
+        self.assertEqual(parsed[1]["package_name"], "水裹+【躺平计划】工作日单人8小时浴资票")
+        self.assertIn("qsMzg2N2Y3YWI", parsed[0]["command_value"])
+        self.assertIn("r0ZTEwYTA0ZjA", parsed[1]["command_value"])
+        self.assertNotIn("dpurl.cn", parsed[0]["command_value"])
+
     def test_reply_template_contains_required_guidance_without_price_or_link(self):
         venue = SimpleNamespace(city="北京", venue_name="九号温泉生活馆")
         offer = SimpleNamespace(command_type="numeric", command_value="930174", package_name="温泉6月专场")
