@@ -77,6 +77,18 @@ def normalize_text(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or "")).lower()
 
 
+def contains_match_token(text_value: str, token: str) -> bool:
+    normalized = normalize_text(text_value)
+    token_value = normalize_text(token)
+    if token_value in {"8h", "8小时"}:
+        return bool(re.search(r"(?<!\d)8(?:h|小时)", normalized))
+    if token_value in {"16h", "16小时"}:
+        return bool(re.search(r"(?<!\d)16(?:h|小时)", normalized))
+    if token_value in {"18h", "18小时"}:
+        return bool(re.search(r"(?<!\d)18(?:h|小时)", normalized))
+    return bool(token_value and token_value in normalized)
+
+
 def extract_keywords(package_name: str) -> list[str]:
     seeds = re.split(r"[｜|/、，,＋+\s【】\[\]（）()·]+", package_name)
     keywords = []
@@ -425,11 +437,34 @@ class PackageReplyService:
                 "8h", "8小时", "16h", "16小时", "18h", "18小时",
                 "海鲜", "榴莲",
             ]:
-                if token.lower() in normalized and normalize_text(token) in package_text:
+                if contains_match_token(message, token) and contains_match_token(offer.package_name, token):
                     score += 0.16
                     matched_strong_tokens += 1
             if matched_strong_tokens >= 3:
                 score = max(score, 0.76)
+            conflict_pairs = [
+                ("工作日", "节假日"),
+                ("8h", "18h"),
+                ("8小时", "18小时"),
+                ("单人", "双人"),
+                ("周五", "周日"),
+                ("周六", "周日"),
+                ("周五", "周四"),
+                ("周六", "周四"),
+            ]
+            for wanted, conflicting in conflict_pairs:
+                if (
+                    contains_match_token(message, wanted)
+                    and not contains_match_token(offer.package_name, wanted)
+                    and contains_match_token(offer.package_name, conflicting)
+                ):
+                    score -= 0.32
+                if (
+                    contains_match_token(message, conflicting)
+                    and not contains_match_token(offer.package_name, conflicting)
+                    and contains_match_token(offer.package_name, wanted)
+                ):
+                    score -= 0.32
             number_match = re.search(r"(?:套餐|咨询)?\s*([1-9])", normalized)
             if number_match and (f"{number_match.group(1)}" in package_text or f"{number_match.group(1)}️⃣" in offer.package_name):
                 score += 0.35
