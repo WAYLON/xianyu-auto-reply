@@ -80,6 +80,17 @@ class PackageReplyServiceTests(unittest.TestCase):
         self.assertIn("r0ZTEwYTA0ZjA", parsed[1]["command_value"])
         self.assertNotIn("dpurl.cn", parsed[0]["command_value"])
 
+    def test_parse_ignores_separator_line_after_command(self):
+        raw = """
+🎁【九号温泉生活馆学生享｜平日18H/假日6H+娱乐三选一+榴莲畅吃】
+【团口令】1来美团，吃得更好，生活更好❤️复制整条信息，打开👉美团👈 http:/💰wfZTc1ZDJlOGI💰
+｜
+"""
+        parsed = parse_package_material(raw)
+        self.assertEqual(len(parsed), 1)
+        self.assertIn("wfZTc1ZDJlOGI", parsed[0]["command_value"])
+        self.assertNotIn("｜", parsed[0]["command_value"])
+
     def test_reply_template_contains_required_guidance_without_price_or_link(self):
         venue = SimpleNamespace(city="北京", venue_name="九号温泉生活馆")
         offer = SimpleNamespace(command_type="numeric", command_value="930174", package_name="温泉6月专场")

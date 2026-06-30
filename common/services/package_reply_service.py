@@ -27,6 +27,7 @@ NUMERIC_COMMAND_CONTEXT = re.compile(r"(美团搜索|搜索口令|数字口令|�
 FULL_COMMAND_CONTEXT = re.compile(r"【团口令】\s*(.+?)(?=\n\s*\n|\n\s*🎁|$)", re.S)
 TITLE_LINE_PATTERN = re.compile(r"^\s*(?:🎁)?【(.{4,220})】\s*$")
 PRICE_OR_LINK_LINE = re.compile(r"(门市价|现价|下单链接|http://|https://|dpurl\.cn)", re.I)
+MATERIAL_NOISE_LINE = re.compile(r"^[｜|\\-—_\\s]+$")
 MATERIAL_FIELD_TITLES = {"下单链接", "团口令", "搜索口令", "美团搜索", "数字口令"}
 
 
@@ -131,7 +132,7 @@ def parse_package_material(raw_text: str) -> list[dict[str, Any]]:
             cleaned_lines = [
                 line.strip()
                 for line in full_match.group(1).splitlines()
-                if line.strip() and not PRICE_OR_LINK_LINE.search(line)
+                if line.strip() and not PRICE_OR_LINK_LINE.search(line) and not MATERIAL_NOISE_LINE.fullmatch(line.strip())
             ]
             command_value = "\n".join(cleaned_lines).strip()
             command_type = "group_text"
@@ -465,6 +466,9 @@ class PackageReplyService:
                     and contains_match_token(offer.package_name, wanted)
                 ):
                     score -= 0.32
+            for required_token in ["学生", "双人", "单人", "儿童"]:
+                if contains_match_token(message, required_token) and not contains_match_token(offer.package_name, required_token):
+                    score -= 0.45
             number_match = re.search(r"(?:套餐|咨询)?\s*([1-9])", normalized)
             if number_match and (f"{number_match.group(1)}" in package_text or f"{number_match.group(1)}️⃣" in offer.package_name):
                 score += 0.35
