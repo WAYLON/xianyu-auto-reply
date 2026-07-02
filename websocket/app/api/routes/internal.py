@@ -658,6 +658,67 @@ async def cancel_order(request: CancelOrderRequest):
     return {"success": True, "code": 200, "message": "订单已取消", "data": {"order_no": request.order_no}}
 
 
+async def _record_delivery_log(
+    cookie_id: str,
+    order_no: str,
+    chat_id: str,
+    item_id: str | None,
+    delivery_method: str,
+    send_status: str,
+    send_fail_reason: str | None = None,
+    delivery_content: str = "",
+) -> None:
+    """记录定时/手动发货的消息日志（reply_strategy=auto_delivery）
+
+    与实时自动发货日志格式保持一致，让前端"发送状态"列能统一展示。
+
+    Args:
+        cookie_id: 账号ID
+        order_no: 订单号
+        chat_id: 会话ID
+        item_id: 商品ID
+        delivery_method: 发货方式（manual/scheduled）
+        send_status: 发送状态（success/failed）
+        send_fail_reason: 失败原因（成功时传None）
+        delivery_content: 发货内容（用于日志展示）
+    """
+    try:
+        from app.services.xianyu.auto_reply_log_service import AutoReplyLogService
+        from common.utils.time_utils import get_beijing_now_naive
+
+        # 发货方式中文标签（与前端筛选口径一致）
+        method_label = {"manual": "手动", "scheduled": "定时", "auto": "自动"}.get(
+            delivery_method, delivery_method
+        )
+        log_payload = {
+            "sender_user_id": "system",
+            "sender_user_name": "系统发货",
+            "source_message": f"[{method_label}发货] 订单: {order_no}",
+            "chat_id": chat_id,
+            "item_id": item_id,
+            "order_no": order_no,
+            "msg_time": get_beijing_now_naive(),
+            "process_status": "success" if send_status == "success" else "failed",
+            "decision_reason": "auto_delivery",
+            "reply_strategy": "auto_delivery",
+            "reply_mode": "text",
+            "reply_text": delivery_content[:200] if delivery_content else "",
+            "error_message": send_fail_reason,
+            "send_status": send_status,
+            "send_fail_reason": send_fail_reason,
+            "context_snapshot": {
+                "delivery_method": delivery_method,
+                "order_id": order_no,
+            },
+        }
+
+        log_service = AutoReplyLogService(cookie_id)
+        await log_service.record_message(log_payload)
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"【内部API】写入{delivery_method}发货消息日志失败: {e}")
+
+
 @router.post("/orders/deliver")
 async def deliver_order(request: DeliverOrderRequest):
     """
@@ -685,7 +746,8 @@ async def deliver_order(request: DeliverOrderRequest):
         from common.db.session import async_session_maker
         from sqlalchemy import select
         from common.models.card import Card
-        
+        from app.services.xianyu.auto_delivery_handler import SEND_BEFORE_CONFIRM_WAIT_TIMEOUT
+
         logger.info(f"【内部API】收到订单发货请求: order_no={request.order_no}, 发货方式={request.delivery_method}")
         
         # 根据订单号获取账号ID
@@ -1158,6 +1220,9 @@ async def deliver_order(request: DeliverOrderRequest):
         final_contents: list[str] = []
         failed_indices: list[int] = []
         early_break_reason: str | None = None  # 库存不足 / api 失败导致提前结束的原因
+        # 收集每条文本消息的发送结果（含 send_future / mid），循环结束后统一等待闲鱼服务端回执，
+        # 识别异步风控拦截（CSI_FORBID 等）。图片消息无回执 future，不参与拦截判定。
+        send_results: list = []
 
         for i in range(quantity):
             # ---- 1. 获取本张卡密的原始内容 ----
@@ -1251,7 +1316,8 @@ async def deliver_order(request: DeliverOrderRequest):
                         ws,
                         request.chat_id,
                         request.buyer_id,
-                        rendered
+                        rendered,
+                        send_results=send_results
                     )
                     final_contents.append(rendered)
                     send_ok = True
@@ -1284,9 +1350,44 @@ async def deliver_order(request: DeliverOrderRequest):
         send_failed_count = len(failed_indices)
         send_success_count = actual_count - send_failed_count
 
+        # ============ 等待闲鱼服务端回执，识别异步风控拦截（CSI_FORBID 等） ============
+        # send_msg 的 await websocket.send() 只保证消息写出到长连接即返回成功，
+        # 闲鱼对违规内容的拦截响应是异步回来的（按 mid 匹配 send_future）。
+        # 这里统一等待本次所有文本消息的回执，被拦截则视为"疑似未送达"，
+        # 后续标记订单已发货 + 写拦截警告（库存已扣，不自动重发以免资损/再次被拦）。
+        card_intercept_reason: str | None = None
+        try:
+            waiters = [
+                (r.get("send_future"), r.get("mid"))
+                for r in send_results
+                if isinstance(r, dict) and r.get("send_future") is not None
+            ]
+            wait_fn = getattr(xianyu_live, "wait_send_reject_reason", None)
+            if callable(wait_fn) and waiters:
+                wait_results = await asyncio.gather(
+                    *(wait_fn(send_future, mid, timeout=SEND_BEFORE_CONFIRM_WAIT_TIMEOUT)
+                      for send_future, mid in waiters),
+                    return_exceptions=True,
+                )
+                reasons: list[str] = []
+                for r in wait_results:
+                    if isinstance(r, Exception):
+                        logger.warning(f"【内部API】等待卡券服务端回执异常: {r}")
+                        continue
+                    if r:
+                        reasons.append(r)
+                if reasons:
+                    # 去重保序
+                    card_intercept_reason = "；".join(dict.fromkeys(reasons))
+                    logger.warning(
+                        f"【内部API】订单 {request.order_no} 卡券疑似被平台拦截未送达: {card_intercept_reason}"
+                    )
+        except Exception as wait_err:
+            logger.warning(f"【内部API】等待卡券服务端回执失败（不影响发货主流程）: {wait_err}")
+
         # ============ "卡券发送成功再确认发货"模式：卡券已发送，现在执行确认发货 ============
         send_before_confirm_fail_msg: str | None = None
-        if send_before_confirm_mode and send_success_count > 0 and send_failed_count == 0:
+        if send_before_confirm_mode and send_success_count > 0 and send_failed_count == 0 and not card_intercept_reason:
             logger.info(f"【内部API】卡券全部发送成功，开始执行确认发货: order_no={request.order_no}")
             if xianyu_live.is_auto_confirm_enabled():
                 # 先执行免拼（如果是小刀订单）
@@ -1316,6 +1417,9 @@ async def deliver_order(request: DeliverOrderRequest):
             else:
                 send_before_confirm_fail_msg = "⚠️ 卡券已发送成功，但自动确认发货已关闭，请手动确认发货"
                 logger.info(f"【内部API】自动确认发货已关闭，卡券已发送但跳过确认发货: order_no={request.order_no}")
+        elif send_before_confirm_mode and card_intercept_reason:
+            send_before_confirm_fail_msg = f"⚠️ 卡券疑似被平台拦截未送达（{card_intercept_reason}），已跳过确认发货，请人工核实买家是否收到后再手动确认发货"
+            logger.warning(f"【内部API】{send_before_confirm_fail_msg}，order_no={request.order_no}")
         elif send_before_confirm_mode and send_failed_count > 0:
             send_before_confirm_fail_msg = f"⚠️ 卡券发送存在失败（{send_failed_count}张），已跳过确认发货，请检查买家是否收到完整内容后手动确认发货"
             logger.warning(f"【内部API】卡券发送存在失败（{send_failed_count}张），跳过确认发货: order_no={request.order_no}")
@@ -1362,6 +1466,20 @@ async def deliver_order(request: DeliverOrderRequest):
             if warn_parts:
                 partial_warn_msg = "；".join(warn_parts)
 
+        # 拦截警告：send_before_confirm 模式已在上面单独出 send_before_confirm_fail_msg，避免重复，
+        # 此处仅在非 send_before_confirm 模式下构造。intercept_written_msg 统一记录本次实际写入的
+        # 拦截文案（供响应回传给调用方，scheduler 据此把同一文案写回 delivery_fail_reason，保持一致）。
+        intercept_warn_msg: str | None = None
+        if card_intercept_reason and not send_before_confirm_mode:
+            intercept_warn_msg = (
+                f"⚠️ 卡券疑似被平台风控拦截未送达（{card_intercept_reason}），"
+                f"请人工核实买家是否收到，未收到请手动补发"
+            )
+        intercept_written_msg: str | None = (
+            send_before_confirm_fail_msg if (card_intercept_reason and send_before_confirm_mode)
+            else intercept_warn_msg
+        )
+
         try:
             from common.services.order_service import OrderService
             async with async_session_maker() as db_session:
@@ -1388,12 +1506,14 @@ async def deliver_order(request: DeliverOrderRequest):
                         f"【内部API】订单 {request.order_no} 状态已更新为已发货（共 {actual_count} 张）"
                     )
                 # 在状态更新之后写 fail_reason 提示（避免被 update_order_delivery_info 内部清空）
-                # 合并所有需要写入的 fail_reason（partial_warn_msg + send_before_confirm_fail_msg）
+                # 合并所有需要写入的 fail_reason（partial_warn_msg + send_before_confirm_fail_msg + intercept_warn_msg）
                 combined_fail_reasons = []
                 if partial_warn_msg:
                     combined_fail_reasons.append(partial_warn_msg)
                 if send_before_confirm_fail_msg:
                     combined_fail_reasons.append(send_before_confirm_fail_msg)
+                if intercept_warn_msg:
+                    combined_fail_reasons.append(intercept_warn_msg)
                 if combined_fail_reasons:
                     final_fail_reason = "；".join(combined_fail_reasons)
                     await order_service.update_order_delivery_fail_reason(
@@ -1458,6 +1578,33 @@ async def deliver_order(request: DeliverOrderRequest):
         # 在 success_msg 末尾追加部分异常说明（库存不足 / 发送失败），让前端调用方一眼看到
         if partial_warn_msg:
             success_msg = f"{success_msg}（{partial_warn_msg}）"
+        # 追加拦截提示，让手动发货弹窗（backend-web 直接复用本 message）也能看到
+        if intercept_written_msg:
+            success_msg = f"{success_msg}（{intercept_written_msg}）"
+
+        # ============ 写入发货消息日志（与实时自动发货一致，供"发送状态"列展示） ============
+        # 拦截判定已在上方同步完成，此处可直接定终态：发送层失败 / 平台拦截 → failed，否则 success。
+        if send_failed_count > 0:
+            log_send_status = "failed"
+            log_fail_reason = (
+                f"共 {send_failed_count} 张消息发送失败（第 {','.join(map(str, failed_indices))} 张），请手动补发"
+            )
+        elif card_intercept_reason:
+            log_send_status = "failed"
+            log_fail_reason = intercept_written_msg or card_intercept_reason
+        else:
+            log_send_status = "success"
+            log_fail_reason = None
+        await _record_delivery_log(
+            cookie_id=account_id,
+            order_no=request.order_no,
+            chat_id=request.chat_id,
+            item_id=request.item_id,
+            delivery_method=request.delivery_method,
+            send_status=log_send_status,
+            send_fail_reason=log_fail_reason,
+            delivery_content=combined_content,
+        )
 
         response_data = {
             "order_no": request.order_no,
@@ -1484,6 +1631,11 @@ async def deliver_order(request: DeliverOrderRequest):
             "send_failed_indices": failed_indices,
             # 提前结束原因（库存不足 / api 中途失败），None 表示循环走完未提前结束
             "early_break_reason": early_break_reason,
+            # 卡券是否疑似被平台风控拦截未送达（已等待闲鱼服务端回执判定）。
+            # True 时订单仍按平台状态标记，但 send_intercept_reason 已写入 delivery_fail_reason，
+            # 调用方（scheduler）应据此把补发货批次日志记为失败，提示人工核实。
+            "send_intercepted": bool(card_intercept_reason),
+            "send_intercept_reason": intercept_written_msg,
         }
         if card.type == 'image':
             # 兼容旧字段：单张图片场景仍返回 image_url

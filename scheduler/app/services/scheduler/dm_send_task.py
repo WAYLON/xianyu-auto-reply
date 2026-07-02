@@ -4,16 +4,19 @@
 功能：
 1. 查询采集商品表中"最近2天下单成功(order_status=success 且 ordered_at>=今日00:00前推2天) 且
    卖家真实ID已补全(seller_user_id 不为空) 且 未私信(is_dm_sent=0)"的数据
-2. 取私信内容(dm_content)与候选账号——参照自动下单定时任务：任务下单账号(order_account_ids)
-   + 用户级兜底账号 + 管理员兜底账号（合并去重，任务账号在前、兜底在后）
-3. 在候选账号中轮换取账号发起私信：参照既有发起聊天逻辑，调用 WebSocket 服务的
+2. 取私信内容(dm_content)；发私信账号严格使用"该商品下单成功时使用的账号"(order_account_id)，
+   即"下单用哪个账号，就用哪个账号发起私信"
+3. 用下单账号发起私信：参照既有发起聊天逻辑，调用 WebSocket 服务的
    create-chat 创建/获取与卖家的会话，再调用 send-message 发送私信内容
 4. 发送成功后将该采集商品标记为已私信(is_dm_sent=1)，并记录成功私信使用的账号(dm_account_id)
 
 账号规则：
-- 账号不可用（离线/会话创建失败/Token过期等）：本次运行不再使用该账号，换下一个账号，不计私信尝试次数
-- 内容发送被拦截(failed)：累计私信尝试次数(dm_attempts)，清空 dm_account_id，本次不再换号（下次任务再试）
+- 严格使用下单账号(order_account_id)：下单用哪个账号就用哪个账号发私信，不换号
+- 下单账号已删除（账号表查无此账号）：私信无法进行，直接判失败、置终态(dm_attempts 置上限)不再重试
+- 下单账号仍存在但当前不可用（未启用/未启动/WebSocket未连接等）：本次跳过，不计尝试次数，留待下次任务再试
+- 内容发送被拦截(failed)：累计私信尝试次数(dm_attempts)，清空 dm_account_id（下次任务再试）
 - 发送成功/超时未确认：标记已私信(终态)，记录 dm_account_id
+- 历史数据未记录下单账号(order_account_id 为空)时：回退到下单账号池(order_account_ids)+兜底账号轮换发送
 
 说明：
 - 仅在"下单成功之后"才发送私信：私信对象是已成功拍下该商品的卖家，故只处理 order_status=success 的数据
@@ -99,7 +102,7 @@ class DmSendTaskService:
             no_account = 0
             failed = 0
 
-            for pk, item_id, seller_user_id, task_id, item_owner_id in items:
+            for pk, item_id, seller_user_id, task_id, item_owner_id, order_account_id in items:
                 # 私信内容、账号、批量上限（按任务缓存）
                 if task_id not in task_content_cache:
                     (
@@ -111,8 +114,8 @@ class DmSendTaskService:
                 accounts = task_accounts_cache.get(task_id) or []
                 batch_size = task_batch_cache.get(task_id, 5)
 
-                # 未配置下单账号或私信内容：跳过（不发，也不标记）
-                if not dm_content or not accounts:
+                # 未配置私信内容：跳过（不发，也不标记）
+                if not dm_content:
                     skipped_no_config += 1
                     continue
 
@@ -121,19 +124,29 @@ class DmSendTaskService:
                     skipped_batch_full += 1
                     continue
 
-                usable = [a for a in accounts if a.account_id not in disabled_accounts]
-                if not usable:
-                    no_account += 1
-                    continue
+                # 账号选择：严格使用"下单成功的账号"发起私信；
+                # 仅当历史数据未记录下单账号（order_account_id 为空）时，才回退到下单账号池轮换。
+                if order_account_id:
+                    account_ids = [order_account_id]
+                    strict = True
+                else:
+                    account_ids = [
+                        a.account_id for a in accounts if a.account_id not in disabled_accounts
+                    ]
+                    strict = False
+                    if not account_ids:
+                        no_account += 1
+                        continue
 
                 result = await self._send_for_item(
                     pk=pk,
                     item_id=item_id,
                     seller_user_id=seller_user_id,
                     content=dm_content,
-                    accounts=usable,
+                    account_ids=account_ids,
                     rr_start=task_rr.get(task_id, 0),
                     disabled_accounts=disabled_accounts,
+                    strict=strict,
                 )
                 task_rr[task_id] = task_rr.get(task_id, 0) + 1
 
@@ -159,14 +172,14 @@ class DmSendTaskService:
         except Exception as exc:  # noqa: BLE001
             logger.error(f"【{self.task_name}】执行异常: {exc}")
 
-    async def _get_items_to_send(self) -> List[Tuple[int, str, str, int, Optional[int]]]:
-        """查询"最近 2 天下单成功 且 卖家真实ID已补全 且 未私信"的采集商品。
+    async def _get_items_to_send(self) -> List[Tuple[int, str, str, int, Optional[int], Optional[str]]]:
+        """查询"今天和昨天下单成功 且 卖家真实ID已补全 且 未私信"的采集商品。
 
-        Returns: (主键id, item_id, seller_user_id, monitor_task_id, owner_id) 列表
+        Returns: (主键id, item_id, seller_user_id, monitor_task_id, owner_id, order_account_id) 列表
         """
-        # 处理"下单成功时间"为最近 2 天（北京时间今天 00:00 前推 2 天）的采集商品，
-        # 提供 48 小时容错窗口，避免定时任务短期故障导致私信永久遗漏
-        cutoff_time = get_beijing_now_naive().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=2)
+        # 只处理"下单成功时间"为今天和昨天（北京时间今天 00:00 前推 1 天 = 昨天 00:00 起）的采集商品，
+        # 提供 24 小时容错窗口，避免定时任务短期故障导致私信永久遗漏
+        cutoff_time = get_beijing_now_naive().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
         async with async_session_maker() as session:
             stmt = (
                 select(
@@ -175,13 +188,14 @@ class DmSendTaskService:
                     ListingMonitorItem.seller_user_id,
                     ListingMonitorItem.monitor_task_id,
                     ListingMonitorItem.owner_id,
+                    ListingMonitorItem.order_account_id,
                 )
                 .where(
                     and_(
                         ListingMonitorItem.is_dm_sent.is_(False),
                         # 下单成功之后才发送私信（仅 success，排除失败/重复/无账号等非成功状态）
                         ListingMonitorItem.order_status == "success",
-                        # 处理"下单成功时间"为最近 2 天的数据（ordered_at 仅在下单成功时写入北京时间）
+                        # 处理"下单成功时间"为今天和昨天的数据（ordered_at 仅在下单成功时写入北京时间）
                         ListingMonitorItem.ordered_at >= cutoff_time,
                         ListingMonitorItem.dm_attempts < _MAX_DM_ATTEMPTS,
                         ListingMonitorItem.seller_user_id.isnot(None),
@@ -192,7 +206,7 @@ class DmSendTaskService:
                 .limit(_MAX_ITEMS_SCAN_PER_RUN)
             )
             rows = (await session.execute(stmt)).all()
-            return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+            return [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows]
 
     async def _get_task_dm_config(
         self, task_id: int, owner_id: Optional[int]
@@ -260,32 +274,56 @@ class DmSendTaskService:
         item_id: str,
         seller_user_id: str,
         content: str,
-        accounts: List[XYAccount],
+        account_ids: List[str],
         rr_start: int,
         disabled_accounts: set[str],
+        strict: bool = False,
     ) -> str:
-        """对单个商品轮换账号发起私信。
+        """对单个商品发起私信。
+
+        Args:
+            account_ids: 候选账号ID列表。strict=True 时仅含下单账号一个，必须用它发，不换号。
+            strict: 严格模式——只用下单成功的账号发私信；该账号不可用则本次跳过，
+                    不换号、不全局停用、不累计尝试次数，留待下次任务再试。
 
         Returns: "sent" / "failed" / "no_account"
         """
-        n = len(accounts)
+        n = len(account_ids)
         tried = 0
         for offset in range(n):
-            acc = accounts[(rr_start + offset) % n]
-            if acc.account_id in disabled_accounts:
+            account_id = account_ids[(rr_start + offset) % n]
+            if account_id in disabled_accounts:
                 continue
             tried += 1
-            res = await self._send_dm(
-                account_id=acc.account_id,
+            res, send_fail_msg = await self._send_dm(
+                account_id=account_id,
                 seller_user_id=seller_user_id,
                 item_id=item_id,
                 content=content,
             )
             if res is None:
-                # 账号级失败（离线/会话创建失败等）：本次停用，换下一个账号，不计尝试次数
-                disabled_accounts.add(acc.account_id)
+                if strict:
+                    # 区分两种情况（以账号表是否存在为准）：
+                    # 1) 账号已删除（账号表查无此账号）：私信永远无法进行 → 直接判失败、置终态不再重试
+                    # 2) 账号仍存在（仅未启用/未启动/WebSocket未连接等暂时不可用）：记录原因后跳过，留待下次任务再试
+                    if not await self._account_exists(account_id):
+                        logger.warning(
+                            f"【{self.task_name}】商品 {item_id} 下单账号 {account_id} 不存在(已被删除)，"
+                            f"判为私信失败，置终态不再重试"
+                        )
+                        await self._mark_dm_account_missing(pk, account_id)
+                        return "failed"
+                    logger.warning(
+                        f"【{self.task_name}】商品 {item_id} 下单账号 {account_id} 当前不可用(存在但未就绪)，"
+                        f"严格模式不换号，本次跳过留待下次任务再试：{send_fail_msg}"
+                    )
+                    # 记录"等待重试"状态与原因，供前端展示（不计尝试次数、不置已私信，下轮继续重试）
+                    await self._mark_dm_waiting(pk, account_id, send_fail_msg)
+                    return "no_account"
+                # 非严格（历史数据回退池）：本次停用该账号，换下一个，不计尝试次数
+                disabled_accounts.add(account_id)
                 logger.warning(
-                    f"【{self.task_name}】账号 {acc.account_id} 私信不可用，本次停用，尝试下一个账号"
+                    f"【{self.task_name}】账号 {account_id} 私信不可用，本次停用，尝试下一个账号：{send_fail_msg}"
                 )
                 continue
 
@@ -296,18 +334,20 @@ class DmSendTaskService:
                 return "failed"
 
             # 成功 / 超时未确认：标记已私信终态，记录成功账号与会话ID
-            await self._record_result(pk, send_status, send_fail_reason, account_id=acc.account_id, chat_id=chat_id)
+            await self._record_result(pk, send_status, send_fail_reason, account_id=account_id, chat_id=chat_id)
             return "sent"
 
-        # 所有账号都不可用
+        # 所有候选账号都不可用
         return "no_account" if tried == 0 else "failed"
 
-    async def _send_dm(self, account_id: str, seller_user_id: str, item_id: str, content: str):
+    async def _send_dm(
+        self, account_id: str, seller_user_id: str, item_id: str, content: str
+    ) -> Tuple[Optional[Tuple[str, Optional[str], Optional[str]]], Optional[str]]:
         """参照既有发起聊天逻辑：创建会话 + 发送私信（并等待发送结果）。
 
-        Returns:
-            None：WebSocket 发送层失败（账号离线/会话创建失败等），应换号；
-            (send_status, send_fail_reason, chat_id)：WebSocket 已发出（不论是否被服务端拦截）。
+        Returns: (result, fail_reason)
+            - 发送层失败（账号离线/未启动/会话创建失败等）：(None, 失败原因)，原因供前端展示与重试判断；
+            - WebSocket 已发出（不论是否被服务端拦截）：((send_status, send_fail_reason, chat_id), None)。
         """
         settings = get_settings()
         http_client = get_http_client()
@@ -320,18 +360,21 @@ class DmSendTaskService:
                 create_url, json={"buyer_id": str(seller_user_id), "item_id": str(item_id)}
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"【{self.task_name}】商品 {item_id} 创建会话异常（账号 {account_id}）：{exc}")
-            return None
+            reason = f"创建会话异常：{exc}"
+            logger.warning(f"【{self.task_name}】商品 {item_id} {reason}（账号 {account_id}）")
+            return None, reason
 
         if not isinstance(create_res, dict) or not create_res.get("success"):
             msg = create_res.get("message") if isinstance(create_res, dict) else create_res
-            logger.warning(f"【{self.task_name}】商品 {item_id} 创建会话失败（账号 {account_id}）：{msg}")
-            return None
+            reason = f"创建会话失败：{msg}"
+            logger.warning(f"【{self.task_name}】商品 {item_id} {reason}（账号 {account_id}）")
+            return None, reason
 
         chat_id = (create_res.get("data") or {}).get("chat_id")
         if not chat_id:
-            logger.warning(f"【{self.task_name}】商品 {item_id} 创建会话响应缺少 chat_id（账号 {account_id}）")
-            return None
+            reason = "创建会话响应缺少 chat_id"
+            logger.warning(f"【{self.task_name}】商品 {item_id} {reason}（账号 {account_id}）")
+            return None, reason
 
         # 2) 发送私信内容（等待服务端结果，识别安全拦截）
         send_url = f"{base_url}/internal/accounts/{account_id}/send-message"
@@ -340,13 +383,15 @@ class DmSendTaskService:
                 send_url, json={"chat_id": chat_id, "message": content, "wait_result": True}
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"【{self.task_name}】商品 {item_id} 发送私信异常（账号 {account_id}）：{exc}")
-            return None
+            reason = f"发送私信异常：{exc}"
+            logger.warning(f"【{self.task_name}】商品 {item_id} {reason}（账号 {account_id}）")
+            return None, reason
 
         if not isinstance(send_res, dict) or not send_res.get("success"):
             msg = send_res.get("message") if isinstance(send_res, dict) else send_res
-            logger.warning(f"【{self.task_name}】商品 {item_id} 发送私信失败（账号 {account_id}）：{msg}")
-            return None
+            reason = f"发送私信失败：{msg}"
+            logger.warning(f"【{self.task_name}】商品 {item_id} {reason}（账号 {account_id}）")
+            return None, reason
 
         data = send_res.get("data") or {}
         send_status = data.get("send_status") or "unknown"
@@ -355,7 +400,7 @@ class DmSendTaskService:
             f"【{self.task_name}】商品 {item_id} 私信已发出："
             f"账号={account_id}，卖家={seller_user_id}，chat_id={chat_id}，结果={send_status}"
         )
-        return (send_status, send_fail_reason, chat_id)
+        return (send_status, send_fail_reason, chat_id), None
 
     async def _record_result(
         self,
@@ -394,6 +439,67 @@ class DmSendTaskService:
             else:
                 # 失败：清空成功私信账号
                 item.dm_account_id = None
+            await session.commit()
+
+    async def _account_exists(self, account_id: str) -> bool:
+        """判断下单账号是否仍存在于账号表（不论启用/登录状态）。
+
+        用于严格模式区分「账号已删除」与「账号仍存在但暂不可用」：
+        - 账号表（xy_accounts）查无此 account_id → 已被删除，私信无法进行；
+        - 查到则视为存在（即便已停用/未登录/未启动，也只是暂时不可用，等待下次循环）。
+        """
+        if not account_id:
+            return False
+        async with async_session_maker() as session:
+            found = (
+                await session.execute(
+                    select(XYAccount.id).where(XYAccount.account_id == account_id)
+                )
+            ).first()
+            return found is not None
+
+    async def _mark_dm_account_missing(self, pk: int, account_id: str) -> None:
+        """下单账号已不存在（被删除）：私信永远无法进行，置为终态不再重试。
+
+        - dm_attempts 置为上限，使查询条件 dm_attempts < _MAX_DM_ATTEMPTS 直接排除该商品；
+        - is_dm_sent 保持 False（确实未私信），不写 dm_account_id；
+        - 记录明确的失败原因供前端查看。
+        """
+        async with async_session_maker() as session:
+            item = (
+                await session.execute(
+                    select(ListingMonitorItem).where(ListingMonitorItem.id == pk)
+                )
+            ).scalar_one_or_none()
+            if not item:
+                return
+            item.dm_status = "failed"
+            item.dm_fail_reason = f"下单账号 {account_id} 不存在(已被删除)，无法发送私信"[:500]
+            item.dm_attempts = _MAX_DM_ATTEMPTS  # 置上限：直接终态，不再重试
+            item.dm_account_id = None
+            await session.commit()
+
+    async def _mark_dm_waiting(self, pk: int, account_id: str, reason: Optional[str]) -> None:
+        """下单账号暂时不可用（仍存在，仅未启用/未启动/未连接）：记录等待原因供前端展示。
+
+        - dm_status 置为 "waiting"（非终态，前端展示"等待重试"）；
+        - 记录失败/等待原因，便于排查；
+        - 不累计 dm_attempts、不置 is_dm_sent，下轮任务继续重试；
+        - 待账号就绪发送成功后，由 _record_result 覆盖为 success/已私信终态。
+        """
+        async with async_session_maker() as session:
+            item = (
+                await session.execute(
+                    select(ListingMonitorItem).where(ListingMonitorItem.id == pk)
+                )
+            ).scalar_one_or_none()
+            if not item:
+                return
+            item.dm_status = "waiting"
+            item.dm_fail_reason = (
+                f"下单账号 {account_id} 当前不可用，等待下次重试：{reason}" if reason
+                else f"下单账号 {account_id} 当前不可用(未启用/未启动)，等待下次重试"
+            )[:500]
             await session.commit()
 
 

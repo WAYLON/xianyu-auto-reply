@@ -86,6 +86,10 @@ LOG_LEVEL=INFO
 # SQL 日志开关：true=打印每条执行的完整 SQL（默认，便于排查）；高并发生产环境可设为 false
 SQL_ECHO=true
 
+# IM Token 缓存（xy_token_cache 表）随机过期时间区间（小时），不配置默认 4~7 小时
+TOKEN_CACHE_TTL_MIN_HOURS=4
+TOKEN_CACHE_TTL_MAX_HOURS=7
+
 # Token过期时间（分钟）
 ACCESS_TOKEN_EXPIRE_MINUTES=1440
 REFRESH_TOKEN_EXPIRE_MINUTES=10080
@@ -119,6 +123,8 @@ REMOTE_OFFICIAL_BASE_URL=https://xy.zhinianboke.com
 ENABLE_REMOTE_ADS=true
 # 是否启用远程官方公告合并展示（官方服务器自身部署建议设为 false）
 ENABLE_REMOTE_ANNOUNCEMENTS=true
+# 是否启用远程官方弹窗公告合并展示（官方服务器自身部署建议设为 false）
+ENABLE_REMOTE_POPUP_ANNOUNCEMENTS=true
 ENVEOF
     echo -e "${GREEN}✓ 已生成 .env 文件${NC}"
     echo -e "${YELLOW}[提示] 如需修改配置（如端口等），请编辑 $ENV_FILE 后重新运行${NC}"
@@ -149,7 +155,8 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-      - --max-connections=500
+      - --max-connections=300
+      - --max-allowed-packet=256M
       - --default-time-zone=+08:00
     volumes:
       - ./xianyu_auto_reply/mysql/data:/var/lib/mysql
@@ -222,9 +229,12 @@ services:
       - REMOTE_OFFICIAL_BASE_URL=${REMOTE_OFFICIAL_BASE_URL:-https://xy.zhinianboke.com}
       - ENABLE_REMOTE_ADS=${ENABLE_REMOTE_ADS:-true}
       - ENABLE_REMOTE_ANNOUNCEMENTS=${ENABLE_REMOTE_ANNOUNCEMENTS:-true}
+      - ENABLE_REMOTE_POPUP_ANNOUNCEMENTS=${ENABLE_REMOTE_POPUP_ANNOUNCEMENTS:-true}
       - BROWSER_HEADLESS=true
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - SQL_ECHO=${SQL_ECHO:-true}
+      - TOKEN_CACHE_TTL_MIN_HOURS=${TOKEN_CACHE_TTL_MIN_HOURS:-4}
+      - TOKEN_CACHE_TTL_MAX_HOURS=${TOKEN_CACHE_TTL_MAX_HOURS:-7}
       - TZ=Asia/Shanghai
     volumes:
       - ./xianyu_auto_reply/logs/backend_web:/app/backend-web/logs
@@ -274,6 +284,8 @@ services:
       - STATIC_DIR=/app/static
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - SQL_ECHO=${SQL_ECHO:-true}
+      - TOKEN_CACHE_TTL_MIN_HOURS=${TOKEN_CACHE_TTL_MIN_HOURS:-4}
+      - TOKEN_CACHE_TTL_MAX_HOURS=${TOKEN_CACHE_TTL_MAX_HOURS:-7}
       - TZ=Asia/Shanghai
     volumes:
       - ./xianyu_auto_reply/logs/websocket:/app/websocket/logs

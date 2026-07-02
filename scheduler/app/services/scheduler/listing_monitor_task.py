@@ -50,6 +50,7 @@ _ITEM_FIELD_LIMITS = {
     "area": 120,
     "pic_url": 1000,
     "seller_id": 120,
+    "seller_user_id": 64,
     "seller_nick": 120,
     "seller_avatar": 1000,
     "want_count": 32,
@@ -451,6 +452,9 @@ class ListingMonitorTaskService:
                     row.area = fields["area"]
                     row.pic_url = fields["pic_url"]
                     row.seller_id = fields["seller_id"]
+                    # 卖家真实ID仅在当前为空时补全，避免覆盖 seller_fill 已通过详情接口补全的值
+                    if not row.seller_user_id and fields["seller_user_id"]:
+                        row.seller_user_id = fields["seller_user_id"]
                     row.seller_nick = fields["seller_nick"]
                     row.seller_avatar = fields["seller_avatar"]
                     row.want_count = fields["want_count"]
@@ -471,6 +475,8 @@ class ListingMonitorTaskService:
                         area=fields["area"],
                         pic_url=fields["pic_url"],
                         seller_id=fields["seller_id"],
+                        # 采集时直接从主图 picUrl 提取卖家真实ID（取不到则 None，由 seller_fill 兜底补全）
+                        seller_user_id=fields["seller_user_id"],
                         seller_nick=fields["seller_nick"],
                         seller_avatar=fields["seller_avatar"],
                         want_count=fields["want_count"],
@@ -610,7 +616,9 @@ class ListingMonitorTaskService:
                 # 仅当使用的是任务账号时推进任务 rr 指针；兜底账号有独立 fallback_rr
                 if acc.account_id in used_task_ids:
                     rr[0] = rr[0] + 1
-                item.dm_account_id = acc.account_id
+                # 仅记录下单账号到 order_account_id；dm_account_id 留待"私信成功后"再写入，
+                # 避免下单完成但尚未私信时前端「私信账号」列提前显示值、与「已私信=否」不一致
+                item.order_account_id = acc.account_id[:80]
                 item.order_attempts = 1
                 item.is_ordered = True
                 item.order_status = "success"
@@ -636,7 +644,8 @@ class ListingMonitorTaskService:
             # 推进任务账号轮换指针（仅当最后失败的是任务账号），避免下个商品仍从同一账号开始
             if last_acc_id in used_task_ids:
                 rr[0] = rr[0] + 1
-            item.dm_account_id = last_acc_id
+            # 不写 dm_account_id：下单失败既无成功私信，也无成功下单账号；
+            # dm_account_id 仅代表"私信成功账号"，避免前端「私信账号」列显示已失败账号、与「已私信=否」不一致
             item.order_attempts = 1
             item.order_status = "failed"
             item.order_fail_reason = str(last_fail_reason)[:500] if last_fail_reason else None

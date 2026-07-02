@@ -6,15 +6,17 @@
  * 2. 支持按监控任务、商品标题筛选
  */
 import { useEffect, useState } from 'react'
-import { ChevronLeft, ChevronRight, Eye, Loader2, PackageSearch, RefreshCw, Search } from 'lucide-react'
+import { CheckSquare, ChevronLeft, ChevronRight, Eye, Loader2, PackageSearch, RefreshCw, RotateCcw, Search, Square } from 'lucide-react'
 import {
   getListingMonitorItems,
   getListingMonitorTaskOptions,
+  resetListingMonitorItemsDm,
   MONITOR_TYPE_LABELS,
   type ListingMonitorItem,
   type ListingMonitorTaskOption,
 } from '@/api/listingMonitor'
 import { PageLoading } from '@/components/common/Loading'
+import { ConfirmModal } from '@/components/common/ConfirmModal'
 import { MonitorItemDetailModal } from './MonitorItemDetailModal'
 import { useUIStore } from '@/store/uiStore'
 import { getApiErrorMessage } from '@/utils/apiError'
@@ -54,6 +56,11 @@ export function MonitorItems() {
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
   const [detailItemPk, setDetailItemPk] = useState<number | null>(null)
+  // 批量勾选的采集商品主键ID集合
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  // 重置私信失败状态：操作中标记 + 确认弹窗开关
+  const [resetting, setResetting] = useState(false)
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false)
 
   const loadTaskOptions = async () => {
     try {
@@ -92,6 +99,8 @@ export function MonitorItems() {
       setItems(result.data.list || [])
       setTotal(result.data.total || 0)
       setTotalPages(result.data.total_pages || 0)
+      // 重新加载数据后清空勾选，避免跨页/筛选后保留过期选择
+      setSelectedIds(new Set())
     } catch (error) {
       addToast({ type: 'error', message: getApiErrorMessage(error, '加载采集商品失败') })
     } finally {
@@ -118,8 +127,63 @@ export function MonitorItems() {
     }
   }
 
+  // 勾选/取消勾选单条
+  const handleSelect = (itemPk: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(itemPk)) {
+        next.delete(itemPk)
+      } else {
+        next.add(itemPk)
+      }
+      return next
+    })
+  }
+
+  // 全选/取消全选当前页
+  const handleSelectAll = () => {
+    const currentPageIds = items.map((item) => item.id)
+    if (currentPageIds.length === 0) {
+      setSelectedIds(new Set())
+      return
+    }
+    const allSelected = currentPageIds.every((id) => selectedIds.has(id))
+    setSelectedIds(allSelected ? new Set() : new Set(currentPageIds))
+  }
+
+  // 批量将选中的"私信失败"商品重置为"未私信"，等待定时任务重试
+  const handleResetDm = async () => {
+    const itemIds = Array.from(selectedIds)
+    if (itemIds.length === 0) {
+      addToast({ type: 'warning', message: '请先勾选要重置的采集商品' })
+      return
+    }
+    setResetting(true)
+    try {
+      const result = await resetListingMonitorItemsDm(itemIds)
+      if (!result.success) {
+        addToast({ type: 'error', message: result.message || '重置私信失败状态失败' })
+        return
+      }
+      const successCount = result.data?.success_count ?? 0
+      setResetConfirmOpen(false)
+      if (successCount === 0) {
+        // 选中的数据里没有"私信失败"的商品，无可重置项，给出明确提示
+        addToast({ type: 'warning', message: '选中的数据中没有可重置的「私信失败」商品' })
+        return
+      }
+      addToast({ type: 'success', message: result.message || `成功重置 ${successCount} 条商品，等待定时任务重试` })
+      await loadItems(page, pageSize)
+    } catch (error) {
+      addToast({ type: 'error', message: getApiErrorMessage(error, '重置私信失败状态失败') })
+    } finally {
+      setResetting(false)
+    }
+  }
+
   const startIndex = total === 0 ? 0 : (page - 1) * pageSize + 1
   const endIndex = Math.min(page * pageSize, total)
+  const isAllSelected = items.length > 0 && items.every((item) => selectedIds.has(item.id))
 
   if (loading) {
     return <PageLoading />
@@ -132,10 +196,22 @@ export function MonitorItems() {
           <h1 className="page-title">采集商品</h1>
           <p className="page-description">查看各监控任务采集到的闲鱼商品信息（同一任务下按商品ID去重，重复出现则更新）。</p>
         </div>
-        <button className="btn-ios-secondary" onClick={() => loadItems(page, pageSize)} disabled={tableLoading}>
-          {tableLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-          刷新
-        </button>
+        <div className="flex gap-3 flex-wrap">
+          {selectedIds.size > 0 && (
+            <button
+              className="btn-ios-secondary"
+              onClick={() => setResetConfirmOpen(true)}
+              disabled={tableLoading || resetting}
+            >
+              {resetting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+              重置私信失败 ({selectedIds.size})
+            </button>
+          )}
+          <button className="btn-ios-secondary" onClick={() => loadItems(page, pageSize)} disabled={tableLoading || resetting}>
+            {tableLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            刷新
+          </button>
+        </div>
       </div>
 
       <div className="vben-card">
@@ -219,6 +295,7 @@ export function MonitorItems() {
               >
                 <option value="">全部</option>
                 <option value="not_sent">未私信</option>
+                <option value="waiting">等待重试</option>
                 <option value="pending">已发待确认</option>
                 <option value="success">私信成功</option>
                 <option value="failed">私信失败</option>
@@ -311,6 +388,15 @@ export function MonitorItems() {
           <table className="table-ios min-w-[2800px]">
             <thead className="sticky top-0 bg-white dark:bg-slate-800 z-10">
               <tr>
+                <th className="w-10 whitespace-nowrap">
+                  <button onClick={handleSelectAll} className="p-1 hover:bg-gray-100 rounded" title={isAllSelected ? '取消全选' : '全选'}>
+                    {isAllSelected ? (
+                      <CheckSquare className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                    ) : (
+                      <Square className="w-4 h-4 text-gray-400" />
+                    )}
+                  </button>
+                </th>
                 <th>ID</th>
                 <th>所属任务</th>
                 <th>商品ID</th>
@@ -330,12 +416,14 @@ export function MonitorItems() {
                 <th>已私信</th>
                 <th>私信账号</th>
                 <th>私信会话ID</th>
-                <th>私信失败原因</th>
+                <th>私信原因</th>
                 <th>私信次数</th>
                 <th>已下单</th>
                 <th>订单ID</th>
+                <th>下单账号</th>
                 <th>下单失败原因</th>
                 <th>下单次数</th>
+                <th>下单时间</th>
                 <th>详情</th>
                 <th>最近采集</th>
                 <th>采集时间</th>
@@ -346,13 +434,13 @@ export function MonitorItems() {
             <tbody>
               {tableLoading ? (
                 <tr>
-                  <td colSpan={30} className="text-center py-12">
+                  <td colSpan={33} className="text-center py-12">
                     <Loader2 className="w-6 h-6 animate-spin text-blue-500 mx-auto" />
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={30} className="text-center py-12 text-slate-400">
+                  <td colSpan={33} className="text-center py-12 text-slate-400">
                     <div className="flex flex-col items-center gap-2">
                       <PackageSearch className="w-12 h-12 text-slate-300 dark:text-slate-600" />
                       <p>暂无采集商品</p>
@@ -361,7 +449,16 @@ export function MonitorItems() {
                 </tr>
               ) : (
                 items.map((item) => (
-                  <tr key={item.id}>
+                  <tr key={item.id} className={selectedIds.has(item.id) ? 'bg-blue-50/60 dark:bg-blue-900/10' : ''}>
+                    <td className="w-10 whitespace-nowrap">
+                      <button onClick={() => handleSelect(item.id)} className="p-1 hover:bg-gray-100 rounded" title={selectedIds.has(item.id) ? '取消勾选' : '勾选'}>
+                        {selectedIds.has(item.id) ? (
+                          <CheckSquare className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                        ) : (
+                          <Square className="w-4 h-4 text-gray-400" />
+                        )}
+                      </button>
+                    </td>
                     <td className="whitespace-nowrap text-slate-500 dark:text-slate-400">{item.id}</td>
                     <td className="max-w-[160px]">
                       <span className="truncate block text-slate-700 dark:text-slate-200" title={item.monitor_task_keyword || `任务#${item.monitor_task_id}`}>
@@ -418,6 +515,8 @@ export function MonitorItems() {
                         ) : (
                           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">已发待确认</span>
                         )
+                      ) : item.dm_status === 'waiting' ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" title={item.dm_fail_reason || '下单账号当前不可用，等待下次重试'}>等待重试</span>
                       ) : (
                         <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400">未私信</span>
                       )}
@@ -444,8 +543,10 @@ export function MonitorItems() {
                       )}
                     </td>
                     <td className="whitespace-nowrap text-slate-600 dark:text-slate-300">{item.order_id || '-'}</td>
+                    <td className="whitespace-nowrap text-slate-600 dark:text-slate-300">{item.order_account_id || '-'}</td>
                     <td className="max-w-[200px]"><span className="truncate block" title={item.order_fail_reason || ''}>{item.order_fail_reason || '-'}</span></td>
                     <td className="text-center">{item.order_attempts || 0}</td>
+                    <td className="whitespace-nowrap text-slate-500 dark:text-slate-400">{item.ordered_at ? new Date(item.ordered_at).toLocaleString('zh-CN') : '-'}</td>
                     <td className="whitespace-nowrap">
                       {item.has_detail ? (
                         <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">已获取</span>
@@ -530,6 +631,17 @@ export function MonitorItems() {
       {detailItemPk !== null && (
         <MonitorItemDetailModal itemPk={detailItemPk} onClose={() => setDetailItemPk(null)} />
       )}
+
+      <ConfirmModal
+        isOpen={resetConfirmOpen}
+        title="重置私信失败状态"
+        message={`已选中 ${selectedIds.size} 条数据，仅其中"私信失败"的商品会被重置为"未私信"，并等待定时任务重新发送私信。是否继续？`}
+        confirmText="确定重置"
+        type="warning"
+        loading={resetting}
+        onConfirm={handleResetDm}
+        onCancel={() => setResetConfirmOpen(false)}
+      />
     </div>
   )
 }

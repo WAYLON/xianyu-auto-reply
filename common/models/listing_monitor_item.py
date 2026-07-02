@@ -26,9 +26,17 @@ class ListingMonitorItem(TimestampMixin, Base):
         Index("idx_lmi_owner", "owner_id"),
         Index("idx_lmi_publish_time", "publish_time"),
         Index("idx_lmi_created", "created_at"),
+        # 「采集商品发送私信」定时任务：order_status='success' + is_dm_sent=0 + ordered_at>=cutoff
+        Index("idx_lmi_dm_send", "order_status", "is_dm_sent", "ordered_at"),
+        # 「采集商品自动下单」定时任务：is_ordered=0 + order_attempts<上限
+        Index("idx_lmi_order_pending", "is_ordered", "order_attempts"),
+        # 下单去重 has_owner_ordered_item：按 item_id + is_ordered 查（item_id 原仅为联合唯一键非最左列）
+        Index("idx_lmi_item_ordered", "item_id", "is_ordered"),
+        # 前端列表分页：owner_id 过滤 + 按 publish_time 排序
+        Index("idx_lmi_owner_publish", "owner_id", "publish_time"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="主键ID")
     monitor_task_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="关联的商品监控任务ID")
     owner_id: Mapped[int | None] = mapped_column(BigInteger, comment="归属用户ID")
     item_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="闲鱼商品ID")
@@ -56,6 +64,7 @@ class ListingMonitorItem(TimestampMixin, Base):
     dm_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0", comment="私信发送尝试次数（失败重试用，达上限后不再重试）")
     is_ordered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0", comment="是否已下单成功")
     order_id: Mapped[str | None] = mapped_column(String(64), comment="下单成功的订单ID（拍下）")
+    order_account_id: Mapped[str | None] = mapped_column(String(80), comment="下单成功使用的账号ID（发起私信时严格使用该账号）")
     order_status: Mapped[str | None] = mapped_column(String(20), comment="下单结果：success-成功，failed-失败")
     order_fail_reason: Mapped[str | None] = mapped_column(String(500), comment="下单失败原因")
     order_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0", comment="下单尝试次数（失败重试用，达上限后不再重试）")

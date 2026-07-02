@@ -13,9 +13,7 @@
 import asyncio
 import base64
 import json
-import random
 import time
-from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -29,7 +27,7 @@ from common.utils.cookie_refresh import (
     merge_cookies,
     update_account_cookies_in_db,
 )
-from common.utils.time_utils import get_beijing_now_naive
+from common.utils.time_utils import get_beijing_now_naive, random_token_cache_expiry
 from common.utils.xianyu_utils import (
     generate_device_id,
     generate_mid,
@@ -214,8 +212,13 @@ class GoofishImClient:
 
     @property
     def is_connected(self) -> bool:
-        """是否已连接并注册"""
-        return self._connected and self._registered
+        """是否已连接并注册（含底层 ws 真实状态双重检查，避免标志位与实际连接不同步）"""
+        return (
+            self._connected
+            and self._registered
+            and self._ws is not None
+            and not self._ws.closed
+        )
 
     # ==================== 业务接口 ====================
 
@@ -534,15 +537,16 @@ class GoofishImClient:
         """将token和device_id缓存到数据库
 
         使用 INSERT ... ON DUPLICATE KEY UPDATE 实现插入或更新
-        过期时间为当前时间 + 8~10小时随机
+        过期时间由环境变量 TOKEN_CACHE_TTL_MIN_HOURS / TOKEN_CACHE_TTL_MAX_HOURS 控制，
+        未配置时默认 4~7 小时随机
 
         Args:
             token_val: IM Token
             device_id_val: 设备ID
         """
         try:
-            ttl_hours = random.uniform(8, 10)
-            expire_at = get_beijing_now_naive() + timedelta(hours=ttl_hours)
+            # 过期时间在配置区间内随机取值（默认 4~7 小时）
+            expire_at, ttl_hours = random_token_cache_expiry()
 
             async with async_session_maker() as session:
                 await session.execute(
@@ -924,6 +928,12 @@ class GoofishImClient:
                     )
                     self._connected = False
                     break
+            else:
+                # async for 正常结束（服务端优雅关闭/网络中断，迭代器自然终止，
+                # 不产生 CLOSED/ERROR 帧）时同步连接状态，避免标志位卡在 True
+                if self._connected:
+                    logger.warning(f"【{self.account_id}】WebSocket连接已关闭")
+                    self._connected = False
         except asyncio.CancelledError:
             pass
         except Exception as e:

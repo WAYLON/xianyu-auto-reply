@@ -67,6 +67,7 @@ export interface ListingMonitorOverview {
   today_collected: number
   today_new: number
   today_dm: number
+  today_dm_failed: number
   today_ordered: number
   today_order_failed: number
   today_order_duplicate: number
@@ -114,6 +115,7 @@ export const getListingMonitorTasks = (
   params?: {
     keyword?: string
     isEnabled?: boolean
+    categoryId?: number
   }
 ): Promise<ApiResponse<ListingMonitorTaskListData>> => {
   const searchParams = new URLSearchParams({
@@ -122,6 +124,7 @@ export const getListingMonitorTasks = (
   })
   if (params?.keyword) searchParams.append('keyword', params.keyword)
   if (params?.isEnabled !== undefined) searchParams.append('is_enabled', String(params.isEnabled))
+  if (params?.categoryId !== undefined) searchParams.append('category_id', String(params.categoryId))
   return get(`${PREFIX}?${searchParams.toString()}`)
 }
 
@@ -283,9 +286,11 @@ export interface ListingMonitorItem {
   dm_attempts?: number
   is_ordered: boolean
   order_id?: string | null
+  order_account_id?: string | null
   order_status?: string | null
   order_fail_reason?: string | null
   order_attempts?: number
+  ordered_at?: string | null
   last_seen_at?: string | null
   created_at?: string | null
   updated_at?: string | null
@@ -333,6 +338,13 @@ export const getListingMonitorItems = (
   if (params?.createdStart) searchParams.append('created_start', params.createdStart)
   if (params?.createdEnd) searchParams.append('created_end', params.createdEnd)
   return get(`${PREFIX}/items?${searchParams.toString()}`)
+}
+
+// 批量将选中的"私信失败"采集商品重置为"未私信"，等待定时任务重试
+export const resetListingMonitorItemsDm = (
+  itemIds: number[]
+): Promise<ApiResponse<ListingMonitorBatchDeleteResult>> => {
+  return post(`${PREFIX}/items/reset-dm`, { ids: itemIds })
 }
 
 // 采集商品完整详情（含数据库存储的原始详情/搜索数据）
