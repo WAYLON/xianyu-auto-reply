@@ -55,6 +55,35 @@ class AutoDeliveryHandler:
         # - card_type:   text / data / image / api / yifan_api，固定内容类（text/image）需退化为 1 张避免重复发同样内容
         self._last_delivery_card_source = None
         self._last_delivery_card_type = None
+
+    def _extract_embedded_image_send_commands(self, text_content):
+        """Extract inline image send commands from data-card text lines."""
+        if not text_content:
+            return [], text_content
+
+        image_urls = []
+        text_lines = []
+        for line in str(text_content).splitlines():
+            stripped = line.strip()
+            if stripped.startswith("__IMAGE_SEND__"):
+                payload = stripped.replace("__IMAGE_SEND__", "", 1).strip()
+                if payload.startswith("|"):
+                    payload = payload[1:].strip()
+
+                parts = [part.strip() for part in payload.split("|") if part.strip()]
+                if len(parts) >= 2 and parts[0].isdigit():
+                    image_url = parts[1]
+                elif parts:
+                    image_url = parts[0]
+                else:
+                    image_url = ""
+
+                if image_url:
+                    image_urls.append(image_url)
+            else:
+                text_lines.append(line)
+
+        return image_urls, "\n".join(text_lines).strip()
     
     # ==================== 属性代理 ====================
     
@@ -1110,6 +1139,15 @@ class AutoDeliveryHandler:
                                 logger.info(f"未获取到订单数量信息，发送单个卡券")
                         except Exception as e:
                             logger.error(f"获取订单详情失败: {self._safe_str(e)}，发送单个卡券")
+                        if quantity_to_send <= 1:
+                            try:
+                                local_order = db_manager.get_order_by_id(order_id)
+                                local_quantity = int((local_order or {}).get('quantity') or 1)
+                                if local_quantity > 1:
+                                    quantity_to_send = local_quantity
+                                    logger.info(f"从本地订单获取数量: {local_quantity}，将发送 {quantity_to_send} 个卡券")
+                            except Exception as e:
+                                logger.warning(f"从本地订单获取数量失败: {self._safe_str(e)}")
                     elif not multi_quantity_delivery:
                         logger.info(f"商品 {item_id} 未开启多数量发货，发送单个卡券")
                     else:
@@ -1785,6 +1823,28 @@ class AutoDeliveryHandler:
             # 根据商品ID获取卡券（含来源信息：own/dock_l1/dock_l2）
             logger.info(f"根据商品ID获取卡券: {item_id}")
             cards = db_manager.get_cards_by_item_id(item_id, spec_name, spec_value)
+
+            # 兜底：部分新发布/复制的多规格商品，本地商品元数据可能还没有
+            # is_multi_spec 标记。若首次未匹配到卡券，但有订单ID，则主动取一次
+            # 订单规格后重试，避免已配置的多规格卡券被误判为未配置。
+            if not cards and order_id and not (spec_name and spec_value):
+                logger.info(f"商品 {item_id} 首次未匹配到卡券，尝试通过订单详情补取规格后重试: {order_id}")
+                try:
+                    order_detail = await self.fetch_order_detail_info(order_id, item_id, send_user_id)
+                    if order_detail and isinstance(order_detail, dict):
+                        retry_spec_name = order_detail.get('spec_name', '')
+                        retry_spec_value = order_detail.get('spec_value', '')
+                        if retry_spec_name and retry_spec_value:
+                            logger.info(f"补取到规格信息: {retry_spec_name} = {retry_spec_value}")
+                            spec_name = retry_spec_name
+                            spec_value = retry_spec_value
+                            cards = db_manager.get_cards_by_item_id(item_id, spec_name, spec_value)
+                        else:
+                            logger.warning(f"补取订单详情成功但没有规格信息: {order_id}")
+                    else:
+                        logger.warning(f"补取订单详情失败，无法重试规格卡券匹配: {order_id}")
+                except Exception as e:
+                    logger.error(f"补取订单规格并重试卡券匹配失败: {self._safe_str(e)}")
             
             if not cards:
                 self._last_delivery_fail_reason = f"商品 {item_id} 未配置卡券，无法自动发货"
@@ -2052,6 +2112,9 @@ class AutoDeliveryHandler:
                 image_urls = rule.get('card_image_urls') or []
                 single_image_url = rule.get('card_image_url')
                 card_description = rule.get('card_description', '')
+                embedded_image_urls, text_content = self._extract_embedded_image_send_commands(text_content)
+                if embedded_image_urls:
+                    logger.info(f"从卡券文本中提取到 {len(embedded_image_urls)} 张图片发送指令 (卡券ID: {rule['card_id']})")
 
                 # 构建订单上下文变量（用于备注中的变量替换）
                 # 尝试从数据库获取真实商品标题
@@ -2089,30 +2152,29 @@ class AutoDeliveryHandler:
                 # 构建发货内容
                 # 格式: __DELIVERY_WITH_IMAGES__卡券ID|图片数量|图片URL1|图片URL2|...|文字内容
                 # 如果没有图片，则直接返回文字内容
-                if image_urls:
+                all_image_urls = []
+                all_image_urls.extend(image_urls)
+                if single_image_url:
+                    all_image_urls.append(single_image_url)
+                all_image_urls.extend(embedded_image_urls)
+
+                if all_image_urls:
                     # 多图片模式
-                    urls_str = "|".join(image_urls)
+                    urls_str = "|".join(all_image_urls)
                     # 处理文字内容和备注信息
                     if text_content:
                         text_part = process_delivery_content_with_description(text_content, card_description, order_context)
                     elif card_description:
-                        # 图片类型卡券没有text_content，但有备注，直接使用备注作为文字内容
-                        text_part = _replace_order_context_variables(card_description, order_context)
+                        if "{DELIVERY_CONTENT}" in card_description:
+                            text_part = process_delivery_content_with_description("", card_description, order_context)
+                        else:
+                            # 图片类型卡券没有text_content，但有备注，直接使用备注作为文字内容
+                            text_part = _replace_order_context_variables(card_description, order_context)
                     else:
                         text_part = ""
-                    delivery_content = f"__DELIVERY_WITH_IMAGES__{rule['card_id']}|{len(image_urls)}|{urls_str}|{text_part}"
-                    logger.info(f"准备发送多张图片({len(image_urls)}张)和文字内容 (卡券ID: {rule['card_id']})")
-                elif single_image_url:
-                    # 单图片模式
-                    if text_content:
-                        text_part = process_delivery_content_with_description(text_content, card_description, order_context)
-                    elif card_description:
-                        # 图片类型卡券没有text_content，但有备注，直接使用备注作为文字内容
-                        text_part = _replace_order_context_variables(card_description, order_context)
-                    else:
-                        text_part = ""
-                    delivery_content = f"__DELIVERY_WITH_IMAGES__{rule['card_id']}|1|{single_image_url}|{text_part}"
-                    logger.info(f"准备发送图片和文字内容 (卡券ID: {rule['card_id']})")
+                    card_id_for_image_update = "" if embedded_image_urls else str(rule['card_id'])
+                    delivery_content = f"__DELIVERY_WITH_IMAGES__{card_id_for_image_update}|{len(all_image_urls)}|{urls_str}|{text_part}"
+                    logger.info(f"准备发送图片({len(all_image_urls)}张)和文字内容 (卡券ID: {rule['card_id']})")
                 elif text_content:
                     # 没有图片，只有文字
                     delivery_content = process_delivery_content_with_description(text_content, card_description, order_context)

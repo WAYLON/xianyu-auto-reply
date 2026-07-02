@@ -1156,6 +1156,39 @@ class XianyuAsync:
             msg_time: 消息时间
         """
         try:
+            refund_status_messages = {
+                '[退款成功，钱款已原路退返]': 'refunded',
+                '[你关闭了订单，钱款已原路退返]': 'cancelled',
+                '[卖家同意退款]': 'refunded',
+            }
+            if send_message in refund_status_messages:
+                order_id = self._extract_order_id(message)
+                logger.info(f"【{self.cookie_id}】退款/关闭消息检测: {send_message}, 提取订单ID: {order_id}")
+                if not order_id:
+                    logger.warning(f"【{self.cookie_id}】退款/关闭消息无法提取订单ID: {send_message}")
+                    return
+
+                try:
+                    from common.services.order_service import OrderService
+                    from common.db.session import async_session_maker
+
+                    async with async_session_maker() as session:
+                        order_service = OrderService(session)
+                        updated = await order_service.update_order_status(
+                            order_id,
+                            refund_status_messages[send_message],
+                        )
+                        if updated:
+                            logger.info(
+                                f"【{self.cookie_id}】订单 {order_id} 已标记为 "
+                                f"{refund_status_messages[send_message]}，已发卡券不回库，按作废处理"
+                            )
+                        else:
+                            logger.warning(f"【{self.cookie_id}】订单 {order_id} 不存在，无法标记退款/关闭状态")
+                except Exception as e:
+                    logger.error(f"【{self.cookie_id}】更新退款/关闭订单状态失败: {e}")
+                return
+
             # 付款相关消息列表（参照旧框架）
             fetch_detail_messages = [
                 '[我已拍下，待付款]',

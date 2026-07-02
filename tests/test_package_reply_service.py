@@ -8,11 +8,68 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.services.package_reply_service import (
     build_package_clarification_text,
     build_package_reply_text,
+    contains_match_token,
+    message_implies_regular_single_ticket,
+    parse_package_intent,
+    parse_offer_index_request,
     parse_package_material,
+    should_skip_package_reply,
 )
 
 
 class PackageReplyServiceTests(unittest.TestCase):
+    def test_parse_offer_index_request_accepts_buyer_index_phrases(self):
+        cases = {
+            "第1个": 1,
+            "第二个": 2,
+            "选3": 3,
+            "要第4个": 4,
+            "我要4号": 4,
+            "发第5款": 5,
+            "6号套餐": 6,
+            "套餐第7": 7,
+            "咨询套餐8": 8,
+            "明天2号套餐多少钱": 2,
+            "四": 4,
+        }
+        for message, expected in cases.items():
+            with self.subTest(message=message):
+                self.assertEqual(parse_offer_index_request(message), expected)
+
+    def test_parse_offer_index_request_ignores_date_and_headcount(self):
+        cases = [
+            "7月2号周四18小时双人怎么买",
+            "我要4个人",
+            "要4张",
+            "8小时多少钱",
+            "明天2号去多少钱",
+        ]
+        for message in cases:
+            with self.subTest(message=message):
+                self.assertIsNone(parse_offer_index_request(message))
+
+    def test_parse_package_intent_extracts_bath_constraints(self):
+        intent = parse_package_intent("明天工作日单人18H不过夜多少钱")
+        self.assertEqual(intent.day_type, "workday")
+        self.assertEqual(intent.ticket_kind, "single")
+        self.assertEqual(intent.duration_hours, 18)
+        self.assertFalse(intent.overnight)
+        self.assertTrue(intent.asks_price)
+
+    def test_skip_package_reply_keeps_idle_messages_quiet(self):
+        self.assertTrue(should_skip_package_reply("好的"))
+        self.assertTrue(should_skip_package_reply("不用了谢谢"))
+        self.assertFalse(should_skip_package_reply("工作日单人8h"))
+
+    def test_regular_single_ticket_detects_headcount_without_double_ticket(self):
+        self.assertTrue(message_implies_regular_single_ticket("3个人今天去"))
+        self.assertFalse(message_implies_regular_single_ticket("双人今天去"))
+
+    def test_contains_match_token_accepts_common_day_and_duration_aliases(self):
+        self.assertTrue(contains_match_token("周末节假日6H票", "节假日"))
+        self.assertTrue(contains_match_token("平日16小时票", "工作日"))
+        self.assertTrue(contains_match_token("单人16H门票", "16小时"))
+
     def test_parse_full_group_commands_ignores_price_and_link(self):
         raw = """
 🎁【九号温泉生活馆榴莲畅吃｜工作日18H/节假日6H+星级海鲜自助】

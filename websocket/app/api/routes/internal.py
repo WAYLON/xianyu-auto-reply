@@ -1303,23 +1303,45 @@ async def deliver_order(request: DeliverOrderRequest):
                     final_contents.append(f"[图片]{content}")
                     send_ok = True
                 else:
-                    rendered = process_delivery_content_with_description(
-                        content,
-                        card.description or '',
-                        _order_context
+                    embedded_image_urls, clean_content = (
+                        xianyu_live.auto_delivery_handler._extract_embedded_image_send_commands(content)
                     )
-                    logger.info(
-                        f"【内部API】发送文本消息 第 {idx}/{quantity}: {rendered[:50]}..."
-                        if quantity > 1 else f"【内部API】发送文本消息: {rendered[:50]}..."
-                    )
-                    await xianyu_live.auto_delivery_handler._send_text_with_separator(
-                        ws,
-                        request.chat_id,
-                        request.buyer_id,
-                        rendered,
-                        send_results=send_results
-                    )
-                    final_contents.append(rendered)
+                    for img_idx, image_url in enumerate(embedded_image_urls):
+                        logger.info(
+                            f"【内部API】发送嵌入图片消息 第 {img_idx + 1}/{len(embedded_image_urls)}: {image_url}"
+                        )
+                        image_result = await xianyu_live.send_image_msg(
+                            ws,
+                            request.chat_id,
+                            request.buyer_id,
+                            image_url,
+                        )
+                        if not isinstance(image_result, dict) or not image_result.get("success"):
+                            err = image_result.get("error_message", "图片发送失败") if isinstance(image_result, dict) else "图片发送返回异常"
+                            raise RuntimeError(err)
+
+                    if clean_content or "{DELIVERY_CONTENT}" in (card.description or ""):
+                        rendered = process_delivery_content_with_description(
+                            clean_content or "",
+                            card.description or '',
+                            _order_context
+                        )
+                    else:
+                        rendered = card.description or ''
+
+                    if rendered:
+                        logger.info(
+                            f"【内部API】发送文本消息 第 {idx}/{quantity}: {rendered[:50]}..."
+                            if quantity > 1 else f"【内部API】发送文本消息: {rendered[:50]}..."
+                        )
+                        await xianyu_live.auto_delivery_handler._send_text_with_separator(
+                            ws,
+                            request.chat_id,
+                            request.buyer_id,
+                            rendered,
+                            send_results=send_results
+                        )
+                    final_contents.append(rendered or "\n".join(f"[图片]{url}" for url in embedded_image_urls))
                     send_ok = True
             except Exception as send_err:
                 # 发送失败时仍把"原始内容"写入 final_contents 但带失败标记，保证库存被消费的卡密

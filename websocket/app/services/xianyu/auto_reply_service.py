@@ -1168,6 +1168,24 @@ class AutoReplyService:
         try:
             service = PackageReplyService(session)
             match = await service.match_for_message(self.cookie_id, item_id, send_message)
+            if match.custom_reply and match.venue:
+                if reply_trace is not None:
+                    reply_trace["reply_strategy"] = "package_ai"
+                    reply_trace["reply_mode"] = "text"
+                    reply_trace["matched_rule_type"] = "package_direct_options"
+                    reply_trace["reply_text"] = match.custom_reply
+                    reply_trace["reply_segments"] = self._build_text_reply_segments(match.custom_reply)
+                    reply_trace.setdefault("context_snapshot", {})["package_reply"] = {
+                        "matched": True,
+                        "confidence": match.confidence,
+                        "reason": match.reason,
+                        "venue_id": match.venue.id,
+                    }
+                logger.info(
+                    f"【{self.cookie_id}】套餐回复直接发送选项 item_id={item_id} "
+                    f"venue={match.venue.venue_name} confidence={match.confidence:.2f}"
+                )
+                return match.custom_reply
             if not match.offer or not match.venue or match.need_clarification:
                 if match.venue and match.need_clarification:
                     clarification_reply = build_package_clarification_text(match.venue)
