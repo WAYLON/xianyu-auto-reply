@@ -130,6 +130,9 @@ class AutoReplyService:
             f"auto_reply_trace_{cookie_id}",
             default=None,
         )
+        self._recent_buyer_messages: Dict[str, List[Dict[str, Any]]] = {}
+        self._recent_buyer_message_ttl = 600
+        self._recent_buyer_message_limit = 6
     
     async def _get_account(self, session: AsyncSession) -> Optional[XYAccount]:
         """获取账号信息(带缓存)"""
@@ -194,6 +197,52 @@ class AutoReplyService:
             {"mode": "text", "content": msg, "index": index + 1}
             for index, msg in enumerate(messages)
         ]
+
+    def _remember_buyer_message(self, chat_id: str, send_user_id: str, send_message: str) -> None:
+        """缓存同一会话里买家的连续短句，用于套餐回复的上下文合并。"""
+        if not chat_id or not send_user_id or not send_message:
+            return
+
+        now = time.time()
+        messages = [
+            item for item in self._recent_buyer_messages.get(chat_id, [])
+            if now - float(item.get("ts", 0)) <= self._recent_buyer_message_ttl
+        ]
+        messages.append({"ts": now, "sender_id": send_user_id, "message": send_message.strip()})
+        self._recent_buyer_messages[chat_id] = messages[-self._recent_buyer_message_limit:]
+
+        if len(self._recent_buyer_messages) > 1000:
+            stale_chat_ids = [
+                cid for cid, items in self._recent_buyer_messages.items()
+                if not items or now - float(items[-1].get("ts", 0)) > self._recent_buyer_message_ttl
+            ]
+            for cid in stale_chat_ids:
+                self._recent_buyer_messages.pop(cid, None)
+
+    def _build_package_context_message(self, chat_id: str, send_user_id: str, send_message: str) -> str:
+        """把同一买家最近几条短句拼成套餐匹配上下文。"""
+        if not chat_id or not send_message:
+            return send_message
+
+        now = time.time()
+        messages = []
+        for item in self._recent_buyer_messages.get(chat_id, []):
+            if now - float(item.get("ts", 0)) > self._recent_buyer_message_ttl:
+                continue
+            if send_user_id and item.get("sender_id") != send_user_id:
+                continue
+            message = str(item.get("message") or "").strip()
+            if message:
+                messages.append(message)
+
+        if not messages:
+            return send_message
+
+        deduped: List[str] = []
+        for message in messages:
+            if not deduped or deduped[-1] != message:
+                deduped.append(message)
+        return "\n".join(deduped[-self._recent_buyer_message_limit:])
     
     def _parse_image_reply_command(self, reply: str) -> tuple[Optional[str], Optional[str], str]:
         """解析图片发送指令"""
@@ -634,7 +683,7 @@ class AutoReplyService:
                         msg_time=msg_time,
                     )
                 return
-            
+
             # 3. 检查是否是自动发货触发消息（参照旧框架）
             # 这些消息应该由自动发货流程处理，不进行自动回复
             if self.is_auto_delivery_trigger(send_message):
@@ -654,6 +703,8 @@ class AutoReplyService:
                         msg_time=msg_time,
                     )
                 return
+
+            self._remember_buyer_message(chat_id, send_user_id, send_message)
             
             # 4. 检查商品是否属于当前账号
             # 只有商品ID存在时才检查归属，商品ID不存在则继续执行原有逻辑
@@ -1124,6 +1175,16 @@ class AutoReplyService:
                     return keyword_reply
 
                 package_reply = await self.get_package_reply(session, send_message, item_id)
+                if not package_reply:
+                    package_context_message = self._build_package_context_message(
+                        chat_id, send_user_id, send_message
+                    )
+                    if package_context_message != send_message:
+                        if reply_trace is not None:
+                            reply_trace.setdefault("context_snapshot", {})["package_context_message"] = package_context_message
+                        package_reply = await self.get_package_reply(
+                            session, package_context_message, item_id
+                        )
                 if package_reply:
                     return package_reply
                 
