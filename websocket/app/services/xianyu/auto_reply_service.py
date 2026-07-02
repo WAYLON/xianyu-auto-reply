@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import traceback
@@ -225,6 +226,24 @@ class AutoReplyService:
         else:
             result["content"] = content
         return result
+
+    def _is_auto_reply_echo(self, parsed_message: Dict[str, Any]) -> bool:
+        """识别系统自动回复回流的自发消息，避免误暂停会话。"""
+        try:
+            raw_message = parsed_message.get("raw_message")
+            if not isinstance(raw_message, dict):
+                return False
+            message_meta = raw_message.get("1", {}).get("10", {})
+            if not isinstance(message_meta, dict):
+                return False
+            ext_json_raw = message_meta.get("extJson")
+            if not isinstance(ext_json_raw, str) or not ext_json_raw:
+                return False
+            ext_json = json.loads(ext_json_raw)
+            return isinstance(ext_json, dict) and str(ext_json.get("quickReply")) == "1"
+        except Exception as exc:
+            logger.debug(f"【{self.cookie_id}】识别自动回复回流消息失败: {exc}")
+            return False
     
     def _is_send_results_success(self, send_results: List[Dict[str, Any]]) -> bool:
         """判断发送结果是否全部成功"""
@@ -580,6 +599,11 @@ class AutoReplyService:
             myid = getattr(self.xianyu_instance, 'myid', self.cookie_id)
             self._merge_log_context(log_payload, myid=myid)
             if send_user_id == myid:
+                if self._is_auto_reply_echo(parsed_message):
+                    logger.info(f"【{self.cookie_id}】检测到自动回复回流消息，跳过暂停: chat_id={chat_id}")
+                    log_payload["process_status"] = "skipped"
+                    log_payload["decision_reason"] = "self_auto_reply_echo"
+                    return
                 # 手动发出消息，暂停该会话的自动回复
                 log_payload["process_status"] = "skipped"
                 log_payload["decision_reason"] = "self_message"
