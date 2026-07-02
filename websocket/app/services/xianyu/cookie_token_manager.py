@@ -37,6 +37,15 @@ class CookieTokenManager:
             parent: XianyuLive实例，用于访问共享资源
         """
         self.parent = parent
+
+    @staticmethod
+    def _mask_sensitive(value: str | None) -> str:
+        if not value:
+            return "<empty>"
+        text = str(value)
+        if len(text) <= 12:
+            return "***"
+        return f"{text[:4]}...{text[-4:]}"
     
     # ==================== 属性代理 ====================
     
@@ -808,9 +817,11 @@ class CookieTokenManager:
                     self.current_token = cached_token
                     self.last_token_refresh_time = time.time()
                     self.last_token_refresh_status = "success_from_cache"
-                    logger.info(f"【{self.cookie_id}】使用数据库缓存的Token和Device ID")
-                    logger.info(f"【{self.cookie_id}】缓存Token: {cached_token}")
-                    logger.info(f"【{self.cookie_id}】缓存Device ID: {cached_device_id}")
+                    logger.info(
+                        f"【{self.cookie_id}】使用数据库缓存的Token和Device ID "
+                        f"token={self._mask_sensitive(cached_token)} "
+                        f"device_id={self._mask_sensitive(cached_device_id)}"
+                    )
                     return cached_token
             self.restarted_in_browser_refresh = False
 
@@ -1483,4 +1494,3 @@ class CookieTokenManager:
         result['details'] = '; '.join(result['details'])
         logger.info(f"【{self.cookie_id}】Cookie有效性验证完成: {result}")
         return result
-
