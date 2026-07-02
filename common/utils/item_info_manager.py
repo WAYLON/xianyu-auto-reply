@@ -147,11 +147,12 @@ class ItemInfoManager:
                 'Origin': 'https://www.goofish.com'
             }
             
-            # 打印请求参数和请求头
-            logger.info(f"【{self.cookie_id}】请求参数 params: {params}")
-            logger.info(f"【{self.cookie_id}】请求数据 data: {data}")
-            logger.info(f"【{self.cookie_id}】请求数据 data_val: {data_val}")
-            logger.info(f"【{self.cookie_id}】请求头 headers: {dict(headers)}")
+            safe_params = {**params, "sign": "***"} if params.get("sign") else dict(params)
+            safe_headers = {**headers, "Cookie": f"<redacted:{len(self.cookies_str)} chars>"}
+            logger.debug(f"【{self.cookie_id}】请求参数 params: {safe_params}")
+            logger.debug(f"【{self.cookie_id}】请求数据 data: {data}")
+            logger.debug(f"【{self.cookie_id}】请求数据 data_val: {data_val}")
+            logger.debug(f"【{self.cookie_id}】请求头 headers: {safe_headers}")
             
             async with self.session.post(
                 'https://h5api.m.goofish.com/h5/mtop.idle.web.xyh.item.list/1.0/',
