@@ -26,6 +26,8 @@ class SendMessageRequest(BaseModel):
     """发送消息请求"""
     chat_id: str
     message: str
+    to_user_id: str | None = None
+    send_user_id: str | None = None
     # 是否等待服务端发送结果（识别 CSI_FORBID 等安全拦截）。默认 False 保持既有调用方零影响。
     wait_result: bool = False
     wait_timeout: float = 10.0
@@ -540,12 +542,22 @@ async def send_message(account_id: str, request: SendMessageRequest):
                 "data": None,
             }
         
+        message = request.message.replace("\\n", "\n")
+        receiver_id = request.to_user_id or request.send_user_id
+        if not receiver_id:
+            return {
+                "success": False,
+                "code": 400,
+                "message": "缺少收件人ID: 请传 to_user_id 或 send_user_id",
+                "data": None,
+            }
+
         # 发送消息
         send_result = await instance.send_msg(
             websocket=instance.ws,
             chat_id=request.chat_id,
-            send_user_id=None,  # 由实例内部获取
-            content=request.message,
+            send_user_id=receiver_id,
+            content=message,
         )
 
         # WebSocket 发送层失败：直接判失败
@@ -585,7 +597,8 @@ async def send_message(account_id: str, request: SendMessageRequest):
             "data": {
                 "account_id": account_id,
                 "chat_id": request.chat_id,
-                "message": request.message,
+                "to_user_id": receiver_id,
+                "message": message,
                 "send_status": send_status,
                 "send_fail_reason": send_fail_reason,
             },

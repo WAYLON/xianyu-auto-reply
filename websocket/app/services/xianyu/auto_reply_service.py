@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import traceback
 from typing import Optional, List, Dict, Any
@@ -37,6 +38,7 @@ from common.services.package_reply_service import (
     PackageReplyService,
     build_package_clarification_text,
     build_package_reply_text,
+    parse_offer_index_requests,
 )
 
 from app.services.xianyu.resource_manager import pause_manager
@@ -243,6 +245,19 @@ class AutoReplyService:
             if not deduped or deduped[-1] != message:
                 deduped.append(message)
         return "\n".join(deduped[-self._recent_buyer_message_limit:])
+
+    def _looks_like_package_selection(self, send_message: str) -> bool:
+        """识别买家点击/输入的套餐选项，避免被普通消息去重误拦。"""
+        text_value = (send_message or "").strip()
+        if not text_value:
+            return False
+        if re.fullmatch(r"\d{1,2}", text_value):
+            return True
+        if re.match(r"^\d{1,2}\s*[.。)、\-\s]", text_value):
+            return True
+        if parse_offer_index_requests(text_value):
+            return True
+        return "套餐" in text_value and ("【" in text_value or "门票" in text_value or "浴资" in text_value)
     
     def _parse_image_reply_command(self, reply: str) -> tuple[Optional[str], Optional[str], str]:
         """解析图片发送指令"""
@@ -733,7 +748,9 @@ class AutoReplyService:
             
             # 5. 检查消息等待时间(去重，参照旧框架reply_scheduler.py)
             # 同一会话的同一消息内容在等待时间内不重复回复
-            if await self._check_chat_processed(chat_id, send_message):
+            bypass_duplicate = self._looks_like_package_selection(send_message)
+            self._merge_log_context(log_payload, bypass_duplicate_for_package_selection=bypass_duplicate)
+            if not bypass_duplicate and await self._check_chat_processed(chat_id, send_message):
                 logger.info(f"【{self.cookie_id}】消息 '{send_message[:30]}...' 在等待时间内已处理过，跳过自动回复")
                 log_payload["process_status"] = "skipped"
                 log_payload["decision_reason"] = "duplicate_message"
@@ -996,6 +1013,45 @@ class AutoReplyService:
         """
         import asyncio
         send_results: List[Dict[str, Any]] = []
+
+        async def send_text_once(message: str) -> Dict[str, Any]:
+            result = await self.xianyu_instance.send_msg(
+                websocket=websocket,
+                chat_id=chat_id,
+                send_user_id=send_user_id,
+                content=message,
+            )
+            if result and result.get("success"):
+                return result
+
+            error_message = (result or {}).get("error_message", "")
+            retryable_markers = (
+                "keepalive ping timeout",
+                "ConnectionClosed",
+                "no close frame received",
+                "WebSocket",
+                "closed",
+            )
+            if not any(marker in error_message for marker in retryable_markers):
+                return result or self._build_empty_send_result("text", message)
+
+            logger.warning(
+                f"【{self.cookie_id}】文本发送遇到连接异常，等待重连后重试: chat_id={chat_id}, error={error_message}"
+            )
+            for attempt in range(2):
+                await asyncio.sleep(3 + attempt * 2)
+                retry_ws = getattr(self.xianyu_instance, "ws", None) or websocket
+                retry_result = await self.xianyu_instance.send_msg(
+                    websocket=retry_ws,
+                    chat_id=chat_id,
+                    send_user_id=send_user_id,
+                    content=message,
+                )
+                if retry_result and retry_result.get("success"):
+                    logger.info(f"【{self.cookie_id}】文本发送重试成功: chat_id={chat_id}, attempt={attempt + 1}")
+                    return retry_result
+                result = retry_result or result
+            return result or self._build_empty_send_result("text", message)
          
         # 检查是否包含分隔符
         if '######' in text:
@@ -1003,12 +1059,7 @@ class AutoReplyService:
             logger.info(f"【{self.cookie_id}】检测到分隔符，拆分为 {len(messages)} 条消息")
              
             for i, msg in enumerate(messages):
-                result = await self.xianyu_instance.send_msg(
-                    websocket=websocket,
-                    chat_id=chat_id,
-                    send_user_id=send_user_id,
-                    content=msg,
-                )
+                result = await send_text_once(msg)
                 send_results.append(result or self._build_empty_send_result("text", msg))
                 logger.info(f"【{self.cookie_id}】发送文本回复 {i+1}/{len(messages)}: {msg[:50]}...")
                  
@@ -1017,12 +1068,7 @@ class AutoReplyService:
                     await asyncio.sleep(0.5)
         else:
             # 单条消息直接发送
-            result = await self.xianyu_instance.send_msg(
-                websocket=websocket,
-                chat_id=chat_id,
-                send_user_id=send_user_id,
-                content=text,
-            )
+            result = await send_text_once(text)
             send_results.append(result or self._build_empty_send_result("text", text))
             logger.info(f"【{self.cookie_id}】发送文本回复: {text[:50]}...")
 

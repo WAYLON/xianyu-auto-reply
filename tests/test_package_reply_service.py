@@ -6,11 +6,14 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.services.package_reply_service import (
+    PackageReplyMatch,
+    PackageReplyService,
     build_package_clarification_text,
     build_package_reply_text,
     contains_match_token,
     message_implies_regular_single_ticket,
     parse_package_intent,
+    parse_offer_index_requests,
     parse_offer_index_request,
     parse_package_material,
     should_skip_package_reply,
@@ -42,11 +45,17 @@ class PackageReplyServiceTests(unittest.TestCase):
             "我要4个人",
             "要4张",
             "8小时多少钱",
+            "7月4号可以用吗",
             "明天2号去多少钱",
         ]
         for message in cases:
             with self.subTest(message=message):
                 self.assertIsNone(parse_offer_index_request(message))
+
+    def test_parse_offer_index_requests_accepts_multi_price_question(self):
+        self.assertEqual(parse_offer_index_requests("你好，6和8多少钱"), [6, 8])
+        self.assertEqual(parse_offer_index_requests("6、8号多少钱"), [6, 8])
+        self.assertEqual(parse_offer_index_requests("7月4号多少钱"), [])
 
     def test_parse_package_intent_extracts_bath_constraints(self):
         intent = parse_package_intent("明天工作日单人18H不过夜多少钱")
@@ -55,6 +64,10 @@ class PackageReplyServiceTests(unittest.TestCase):
         self.assertEqual(intent.duration_hours, 18)
         self.assertFalse(intent.overnight)
         self.assertTrue(intent.asks_price)
+
+    def test_parse_package_intent_does_not_treat_not_including_overnight_fee_as_overnight(self):
+        intent = parse_package_intent("水之梦【工作日】16小时单人门票+免费四餐（不含过夜费）")
+        self.assertFalse(intent.overnight)
 
     def test_skip_package_reply_keeps_idle_messages_quiet(self):
         self.assertTrue(should_skip_package_reply("好的"))
@@ -69,6 +82,7 @@ class PackageReplyServiceTests(unittest.TestCase):
         self.assertTrue(contains_match_token("周末节假日6H票", "节假日"))
         self.assertTrue(contains_match_token("平日16小时票", "工作日"))
         self.assertTrue(contains_match_token("单人16H门票", "16小时"))
+        self.assertTrue(contains_match_token("24H周末及节假日单人门票", "24小时"))
 
     def test_parse_full_group_commands_ignores_price_and_link(self):
         raw = """
@@ -156,9 +170,11 @@ class PackageReplyServiceTests(unittest.TestCase):
         self.assertIn("930174", reply)
         self.assertIn("美团搜索 86886 领红包", reply)
         self.assertIn("比自己在美团直接买更便宜", reply)
-        self.assertIn("价格实时浮动", reply)
+        self.assertIn("使用规则和库存以确认时为准", reply)
         self.assertNotIn("http", reply.lower())
         self.assertNotIn("现价", reply)
+        self.assertNotIn("门市价", reply)
+        self.assertNotIn("价格", reply)
 
     def test_clarification_template_keeps_package_guardrails(self):
         venue = SimpleNamespace(city="北京", venue_name="九号温泉生活馆")
@@ -166,9 +182,107 @@ class PackageReplyServiceTests(unittest.TestCase):
         self.assertIn("北京九号温泉生活馆", reply)
         self.assertIn("美团搜索 86886 领红包", reply)
         self.assertIn("比自己在美团直接买更便宜", reply)
-        self.assertIn("价格实时浮动", reply)
+        self.assertIn("使用规则和库存以确认时为准", reply)
         self.assertNotIn("http", reply.lower())
         self.assertNotIn("现价", reply)
+        self.assertNotIn("门市价", reply)
+        self.assertNotIn("价格", reply)
+
+    def test_overnight_reply_prefers_actual_night_ticket(self):
+        service = PackageReplyService(SimpleNamespace())
+        venue = SimpleNamespace(city="武汉", venue_name="水之梦")
+        offers = [
+            SimpleNamespace(
+                package_name="水之梦【工作日】16小时单人门票+免费四餐（不含过夜费）",
+                command_type="group_text",
+                command_value="普通口令",
+            ),
+            SimpleNamespace(
+                package_name="水之梦【晚9-次11点14H夜间门票】宵夜+早餐+过夜费",
+                command_type="group_text",
+                command_value="夜票口令",
+            ),
+        ]
+        intent = parse_package_intent("夜票过夜")
+        reply = service._build_overnight_reply("夜票过夜", intent, venue, offers)
+        self.assertIsNotNone(reply)
+        self.assertIn("夜间门票", reply)
+        self.assertNotIn("不含过夜费", reply)
+
+    def test_direct_multi_index_reply_omits_price_wording(self):
+        service = PackageReplyService(SimpleNamespace())
+        venue = SimpleNamespace(city="武汉", venue_name="水之梦")
+        offers = [
+            SimpleNamespace(package_name=f"{idx}号套餐", command_type="group_text", command_value=f"口令{idx}")
+            for idx in range(1, 9)
+        ]
+        match = service._match_direct_command_or_index("6和8多少钱", venue, offers)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.reason, "direct_offer_indexes")
+        self.assertIn("6号套餐", match.custom_reply)
+        self.assertIn("8号套餐", match.custom_reply)
+        self.assertNotIn("价格", match.custom_reply)
+        self.assertNotIn("现价", match.custom_reply)
+
+    def test_short_alias_can_infer_venue(self):
+        service = PackageReplyService(SimpleNamespace())
+        venues = [
+            SimpleNamespace(city="佛山", area=None, brand="乾沣", venue_name="乾沣汤泉生活", address_note=None, aliases_json=["乾沣"]),
+            SimpleNamespace(city="武汉", area=None, brand="水之梦", venue_name="水之梦", address_note=None, aliases_json=["水之梦"]),
+        ]
+        venue = service._match_venue_by_text("乾沣周末24H单人", venues)
+        self.assertEqual(venue.venue_name, "乾沣汤泉生活")
+
+    def test_bound_item_venue_is_not_overridden_by_message_venue(self):
+        service = PackageReplyService(SimpleNamespace())
+        venue = SimpleNamespace(id=1, enabled=True, city="北京", venue_name="水裹+合生汇店")
+        offer = SimpleNamespace(
+            package_name="水裹+【躺平计划】工作日单人8小时浴资票",
+            command_type="group_text",
+            command_value="合生汇口令",
+            keywords_json=[],
+        )
+
+        async def fake_get(_model, _id):
+            return venue
+
+        class FakeScalars:
+            def __init__(self, value):
+                self.value = value
+
+            def first(self):
+                return self.value
+
+            def all(self):
+                return self.value
+
+        class FakeResult:
+            def __init__(self, value):
+                self.value = value
+
+            def scalars(self):
+                return FakeScalars(self.value)
+
+        async def fake_execute(_stmt):
+            if not getattr(fake_execute, "called", False):
+                fake_execute.called = True
+                return FakeResult(SimpleNamespace(venue_id=1))
+            return FakeResult([offer])
+
+        service.session.get = fake_get
+        service.session.execute = fake_execute
+        async def fake_ai_match(*_args, **_kwargs):
+            return None
+
+        service._match_offer_with_ai = fake_ai_match
+        match = self.run_async(service.match_for_message("account", "item", "北京水裹四惠工作日单人"))
+        self.assertIsInstance(match, PackageReplyMatch)
+        self.assertEqual(match.venue.venue_name, "水裹+合生汇店")
+
+    def run_async(self, coro):
+        import asyncio
+
+        return asyncio.run(coro)
 
 
 if __name__ == "__main__":

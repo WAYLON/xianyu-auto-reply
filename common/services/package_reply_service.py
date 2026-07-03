@@ -157,9 +157,9 @@ def parse_package_intent(value: Any) -> PackageIntent:
         duration_hours = 6
 
     overnight = None
-    if any(word in normalized for word in ["不过夜", "不住", "不留宿", "当天走", "当天回", "不要过夜"]):
+    if any(word in normalized for word in ["不过夜", "不含过夜费", "不住", "不留宿", "当天走", "当天回", "不要过夜"]):
         overnight = False
-    elif any(word in normalized for word in ["过夜", "夜场", "夜票", "夜间", "午夜", "晚上去", "早上走", "夜宵", "早餐"]):
+    elif any(word in normalized for word in ["过夜", "夜场", "夜票", "夜间", "午夜", "晚上", "晚上去", "早上走", "夜宵"]):
         overnight = True
 
     ticket_kind = None
@@ -312,6 +312,8 @@ def contains_match_token(text_value: str, token: str) -> bool:
         return bool(re.search(r"(?<!\d)16(?:h|小时)", normalized))
     if token_value in {"18h", "18小时"}:
         return bool(re.search(r"(?<!\d)18(?:h|小时)", normalized))
+    if token_value in {"24h", "24小时"}:
+        return bool(re.search(r"(?<!\d)24(?:h|小时)", normalized))
     return bool(token_value and token_value in normalized)
 
 
@@ -347,10 +349,33 @@ def should_skip_package_reply(message: str) -> bool:
 
 
 def parse_offer_index_request(message: str) -> int | None:
+    indexes = parse_offer_index_requests(message)
+    return indexes[0] if len(indexes) == 1 else None
+
+
+def parse_offer_index_requests(message: str) -> list[int]:
     normalized = normalize_text(message)
     number_token = r"[一二两俩三四五六七八九十\d]+"
     single_index_token = r"[一二两俩三四五六七八九]"
     blocked_suffix = r"(?![个人张位小时h月点:：])"
+    if re.search(r"\d{1,2}月\d{1,2}号?", normalized):
+        return []
+    if any(word in normalized for word in ["多少钱", "多少", "价格", "报价", "几钱"]):
+        normalized_price = re.sub(r"^(?:你好|您好)[,，。！!、]*", "", normalized)
+        multi = re.fullmatch(
+            rf"(?:你好|您好|请问)?({number_token})(?:号)?(?:和|跟|与|、|,|，|\+|＋|/)+({number_token})(?:号)?(?:的)?(?:多少钱|多少|价格|报价|几钱)?[?？]?",
+            normalized_price,
+        )
+        if multi:
+            indexes = [parse_count_token(value) for value in multi.groups()]
+            return [value for value in indexes if value is not None]
+        numbered_price = re.fullmatch(
+            rf"(?:你好|您好|请问)?({number_token})(?:号|号套餐|套餐)?(?:的)?(?:多少钱|多少|价格|报价|几钱)[?？]?",
+            normalized_price,
+        )
+        if numbered_price:
+            value = parse_count_token(numbered_price.group(1))
+            return [value] if value is not None else []
     patterns = [
         rf"(?:咨询|要|发|选|挑|给我|我要|来|看|定|拍)?套餐第?({number_token}){blocked_suffix}",
         rf"套餐第({number_token}){blocked_suffix}",
@@ -364,8 +389,9 @@ def parse_offer_index_request(message: str) -> int | None:
     for pattern in patterns:
         match = re.search(pattern, normalized)
         if match:
-            return parse_count_token(match.group(1))
-    return None
+            value = parse_count_token(match.group(1))
+            return [value] if value is not None else []
+    return []
 
 
 def extract_keywords(package_name: str) -> list[str]:
@@ -442,7 +468,7 @@ def build_package_reply_text(offer: XYPackageOffer, venue: XYPackageVenue) -> st
         f"{command_line}\n\n"
         "先打开美团搜索 86886 领红包，再复制上面的口令去购买。\n"
         "这个一定会比自己在美团直接买更便宜。\n"
-        "价格实时浮动，确认套餐和日期后再拍/购买。"
+        "使用规则和库存以确认时为准，确认后再拍/购买。"
     )
 
 
@@ -452,7 +478,7 @@ def build_package_clarification_text(venue: XYPackageVenue) -> str:
         "您要的是工作日/节假日、单人/双人、18H/过夜，还是儿童/学生票？\n\n"
         "先打开美团搜索 86886 领红包，确认套餐后我发对应口令。\n"
         "会比自己在美团直接买更便宜。\n"
-        "价格实时浮动，确认套餐和日期后再拍/购买。"
+        "使用规则和库存以确认时为准，确认后再拍/购买。"
     )
 
 
@@ -647,9 +673,6 @@ class PackageReplyService:
         venue: XYPackageVenue | None = None
         if binding:
             venue = await self.session.get(XYPackageVenue, binding.venue_id)
-            message_venue = await self._infer_venue_from_text(message)
-            if message_venue and message_venue.id != binding.venue_id:
-                venue = message_venue
         if not venue:
             venue = await self._infer_venue(account_id, item_id, message)
         if not venue or not venue.enabled:
@@ -774,13 +797,17 @@ class PackageReplyService:
         if not intent.has_specific_constraints:
             return None
 
-        overnight_reply = self._build_overnight_reply(intent, venue, offers)
+        overnight_reply = self._build_overnight_reply(message, intent, venue, offers)
         if overnight_reply:
             return PackageReplyMatch(None, venue, 0.8, "structured_overnight", False, overnight_reply)
 
         party_reply = self._build_party_count_reply(message, intent, venue, offers)
         if party_reply:
             return PackageReplyMatch(None, venue, 0.78, "structured_party_count", False, party_reply)
+
+        ticket_kind_reply = self._build_ticket_kind_reply(intent, venue, offers)
+        if ticket_kind_reply:
+            return PackageReplyMatch(None, venue, 0.82, "structured_ticket_kind", False, ticket_kind_reply)
 
         day_price_reply = self._build_day_price_reply(intent, venue, offers)
         if day_price_reply:
@@ -900,6 +927,31 @@ class PackageReplyService:
 
         return None
 
+    def _build_ticket_kind_reply(
+        self,
+        intent: PackageIntent,
+        venue: XYPackageVenue,
+        offers: list[XYPackageOffer],
+    ) -> str | None:
+        if not intent.ticket_kind or intent.day_type or intent.duration_hours or intent.overnight is not None or intent.party_count:
+            return None
+        candidates = []
+        for offer in offers:
+            offer_intent = parse_package_intent(offer.package_name)
+            if offer_intent.ticket_kind == intent.ticket_kind:
+                candidates.append(offer)
+        if not candidates:
+            return None
+        offer = candidates[0]
+        command = (offer.command_value or "").strip()
+        command_line = f"美团搜索口令：{command}" if offer.command_type == "numeric" else f"团口令：\n{command}"
+        return (
+            f"可以，{offer_label_from_intent(intent)}票按这个：\n"
+            f"{offer.package_name}\n"
+            f"{command_line}\n\n"
+            "先打开美团搜索 86886 领红包，再按实际使用日期和页面规则下单。"
+        )
+
     def _build_day_price_reply(
         self,
         intent: PackageIntent,
@@ -965,12 +1017,21 @@ class PackageReplyService:
 
     def _build_overnight_reply(
         self,
+        message: str,
         intent: PackageIntent,
         venue: XYPackageVenue,
         offers: list[XYPackageOffer],
     ) -> str | None:
         if intent.overnight is not True:
             return None
+        normalized_message = normalize_text(message)
+        weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        last_weekday_pos, last_weekday = max(
+            ((normalized_message.rfind(weekday), weekday) for weekday in weekdays),
+            default=(-1, ""),
+        )
+        if last_weekday_pos < 0:
+            last_weekday = ""
         candidates = []
         for offer in offers:
             offer_intent = parse_package_intent(offer.package_name)
@@ -983,6 +1044,18 @@ class PackageReplyService:
                 elif compatible_day_type(intent.day_type, offer_intent.day_type):
                     score += 2
                 elif offer_intent.day_type:
+                    score -= 3
+            offer_text = normalize_text(offer.package_name)
+            for weekday in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]:
+                if weekday in normalized_message:
+                    if weekday in offer_text:
+                        score += 3
+                    else:
+                        score -= 2
+            if last_weekday:
+                if last_weekday in offer_text:
+                    score += 5
+                else:
                     score -= 3
             if intent.ticket_kind and offer_intent.ticket_kind == intent.ticket_kind:
                 score += 1
@@ -1045,6 +1118,27 @@ class PackageReplyService:
             for offer in offers:
                 if command in normalize_text(offer.command_value):
                     return PackageReplyMatch(offer, venue, 0.96, "direct_command")
+        offer_indexes = parse_offer_index_requests(message)
+        if len(offer_indexes) > 1:
+            selected: list[tuple[int, XYPackageOffer]] = []
+            seen: set[int] = set()
+            for offer_index in offer_indexes:
+                if offer_index in seen or not (1 <= offer_index <= len(offers)):
+                    continue
+                seen.add(offer_index)
+                selected.append((offer_index, offers[offer_index - 1]))
+            if selected:
+                lines = [f"{venue.city}{venue.venue_name}给您发对应套餐口令："]
+                for offer_index, offer in selected:
+                    command = (offer.command_value or "").strip()
+                    command_line = f"美团搜索口令：{command}" if offer.command_type == "numeric" else f"团口令：\n{command}"
+                    lines.append("")
+                    lines.append(f"{offer_index}号套餐：{offer.package_name}")
+                    lines.append(command_line)
+                lines.append("")
+                lines.append("先打开美团搜索 86886 领红包，再按对应口令下单。")
+                lines.append("使用规则和库存以确认时为准，确认后再拍/购买。")
+                return PackageReplyMatch(None, venue, 0.9, "direct_offer_indexes", False, "\n".join(lines))
         offer_index = parse_offer_index_request(message)
         if offer_index and 1 <= offer_index <= len(offers):
             return PackageReplyMatch(offers[offer_index - 1], venue, 0.82, "direct_offer_index")
@@ -1078,11 +1172,18 @@ class PackageReplyService:
                 if key and key in normalized:
                     score += min(0.28, 0.08 + len(key) * 0.018)
             package_text = normalize_text(offer.package_name)
+            if "闲时" in normalized:
+                if "闲时" in package_text:
+                    score += 0.45
+                    matched_strong_tokens += 1
+                else:
+                    score -= 0.7
+                    conflict_count += 1
             for token in [
                 "单人", "双人", "亲子", "1大1小", "成人", "儿童", "学生", "工作日", "节假日", "周末",
                 "周一", "周二", "周三", "周四", "周五", "周六", "周日",
                 "全天", "门票", "浴资", "夜", "夜票", "夜间", "过夜", "过夜费", "午夜", "服务费", "早餐", "自助",
-                "6h", "6小时", "8h", "8小时", "16h", "16小时", "18h", "18小时",
+                "6h", "6小时", "8h", "8小时", "16h", "16小时", "18h", "18小时", "24h", "24小时",
                 "海鲜", "榴莲", "榴莲自由", "躺平计划", "早餐畅享", "龙之梦", "浑南",
                 "搓澡", "护理", "施丹兰", "消费券", "免门票",
             ]:
@@ -1290,11 +1391,16 @@ class PackageReplyService:
         best: tuple[float, XYPackageVenue] | None = None
         for venue in venues:
             score = 0.0
-            candidates = [venue.city, venue.area, venue.brand, venue.venue_name, venue.address_note, *(venue.aliases_json or [])]
+            strong_candidates = [venue.brand, venue.venue_name, *(venue.aliases_json or [])]
+            candidates = [venue.city, venue.area, venue.address_note, *strong_candidates]
             for candidate in candidates:
                 key = normalize_text(candidate)
                 if key and key in normalized:
                     score += 0.25 + min(len(key) * 0.02, 0.25)
+            for candidate in strong_candidates:
+                key = normalize_text(candidate)
+                if len(key) >= 2 and key in normalized:
+                    score = max(score, 0.5 + min(len(key) * 0.03, 0.18))
             if best is None or score > best[0]:
                 best = (score, venue)
         return best[1] if best and best[0] >= 0.35 else None

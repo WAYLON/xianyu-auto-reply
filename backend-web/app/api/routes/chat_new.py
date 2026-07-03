@@ -432,16 +432,17 @@ async def send_message(
         if not client or not client.is_connected:
             return ApiResponse(success=False, message="账号未连接，请先连接")
 
-        if not req.text.strip():
+        text = req.text.replace("\\n", "\n")
+        if not text.strip():
             return ApiResponse(success=False, message="消息内容不能为空")
 
         send_result = await client.send_text_message(
             cid=req.cid,
             to_user_id=req.toUserId,
-            text=req.text,
+            text=text,
         )
         logger.info(
-            f"【{account_id}】发送消息到 {req.toUserId}: {req.text[:50]}"
+            f"【{account_id}】发送消息到 {req.toUserId}: {text[:50]}"
         )
         return ApiResponse(
             success=True,
